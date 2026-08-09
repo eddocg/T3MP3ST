@@ -215,6 +215,7 @@ import type {
   Finding,
   ScanProgressEvent,
   Task,
+  TaskResult,
 } from './types/index.js';
 
 // Re-export commonly used types
@@ -841,6 +842,9 @@ export class TempestCommand extends EventEmitter<CommandEvents> {
 
     this.running = false;
     this.taskSeeded = false;
+    // Drop any pending timeout-reconciliation markers — a promise that never
+    // settles must not leave its id lingering across missions.
+    this.timedOutDispatches.clear();
     if (this.tickInterval) {
       clearInterval(this.tickInterval);
       this.tickInterval = null;
@@ -887,6 +891,16 @@ export class TempestCommand extends EventEmitter<CommandEvents> {
   /** The operator each in-flight dispatch was assigned to, keyed by task id — so a
    * timed-out dispatch can reset the exact wedged operator back to idle. */
   private dispatchOperators: Map<string, OperatorAgent> = new Map();
+
+  /**
+   * Task ids the backstop force-failed as a timeout WHILE their operator promise
+   * was still in flight. When such a promise later settles, its completion handler
+   * consults this set to reconcile the task instead of silently discarding the
+   * result (a late success flips failed→completed; a late failure stays failed).
+   * Membership is consumed (deleted) on the first settle, so at most one
+   * reconciliation happens per timed-out dispatch. Cleared wholesale in stop().
+   */
+  private timedOutDispatches: Set<string> = new Set();
 
   /**
    * GENEROUS per-dispatch wall-clock backstop (ms). If a single task dispatch stays
@@ -1067,9 +1081,12 @@ export class TempestCommand extends EventEmitter<CommandEvents> {
       // Execute asynchronously
       operator.assignTask(task, target).then((result) => {
         // If the backstop already reaped this dispatch, activeDispatches no longer
-        // has it — skip so we don't clobber the timed-out task's terminal state or
-        // double-fire the completion hook.
-        if (!this.activeDispatches.has(task.id)) return;
+        // has it. Rather than discard the late result (which left the event ledger
+        // saying "completed" while the task stayed "failed"), reconcile it.
+        if (!this.activeDispatches.has(task.id)) {
+          this.reconcileLateResult(taskQueue, task, result);
+          return;
+        }
         this.clearDispatch(task.id);
         if (result.success === false) {
           taskQueue.fail(task.id, result.error || result.output || 'task returned unsuccessful result');
@@ -1078,7 +1095,13 @@ export class TempestCommand extends EventEmitter<CommandEvents> {
           this.hooks.onTaskCompleted?.(task);
         }
       }).catch((_error) => {
-        if (!this.activeDispatches.has(task.id)) return;
+        // Late rejection after a timeout: the backstop already marked the task
+        // failed, which is the correct terminal state — just consume the timeout
+        // marker so it can't reconcile a later phantom settle.
+        if (!this.activeDispatches.has(task.id)) {
+          this.timedOutDispatches.delete(task.id);
+          return;
+        }
         this.clearDispatch(task.id);
         try {
           taskQueue.fail(task.id, _error instanceof Error ? _error.message : String(_error));
@@ -1097,6 +1120,53 @@ export class TempestCommand extends EventEmitter<CommandEvents> {
     this.activeDispatches.delete(taskId);
     this.dispatchStartTimes.delete(taskId);
     this.dispatchOperators.delete(taskId);
+  }
+
+  /**
+   * Reconcile a dispatch result that arrived AFTER the backstop already reaped it.
+   *
+   * The backstop force-fails a timed-out dispatch and removes it from
+   * activeDispatches so the mission can advance. But the operator promise is not
+   * cancelled — the tools keep running and may still finish. When they do, the
+   * completion handler finds the id gone from activeDispatches. Previously it just
+   * returned, leaving the task permanently `failed` even though the event ledger
+   * recorded `task_completed success:true`. This bridges that split.
+   *
+   * Reconciliation is deliberately conservative:
+   *  - It only acts on a task THIS backstop timed out (tracked in
+   *    timedOutDispatches); an unrelated stale/duplicate settle is ignored.
+   *  - Membership is consumed here, so at most one reconciliation runs per timeout.
+   *  - It only overwrites a task still in `failed` — if something else already
+   *    moved it to a terminal `completed`, we don't touch it.
+   *  - Late SUCCESS ⇒ failed → completed (annotated as reconciled-after-timeout,
+   *    original evidence preserved). Late FAILURE ⇒ stays failed (correct already).
+   */
+  private reconcileLateResult(taskQueue: TaskQueue, task: Task, result: TaskResult): void {
+    // Only reconcile a dispatch that WE timed out. delete() both tests membership
+    // and consumes it, so a second settle of the same promise can't re-run this.
+    if (!this.timedOutDispatches.delete(task.id)) return;
+
+    const current = taskQueue.getTask(task.id);
+    // If it isn't sitting in the failed state the backstop put it in, leave it be —
+    // don't resurrect a task that was legitimately re-driven or completed elsewhere.
+    if (!current || current.status !== 'failed') return;
+
+    // A late failure is already reflected by the timeout's failed state.
+    if (result.success === false) return;
+
+    // Late success: promote to completed, keeping a breadcrumb that it landed after
+    // the timeout backstop had already fired (so the audit trail is honest).
+    const priorError = current.result?.error;
+    const reconciled: TaskResult = {
+      ...result,
+      output: [
+        result.output,
+        `[reconciled] completed after dispatch timeout backstop fired${priorError ? ` (prior: ${priorError})` : ''}`,
+      ].filter(Boolean).join('\n'),
+    };
+    taskQueue.complete(task.id, reconciled);
+    this.hooks.onTaskCompleted?.(task);
+    console.warn(`[T3MP3ST] task ${task.id} reconciled failed→completed — operator finished after the timeout backstop fired`);
   }
 
   /**
@@ -1161,8 +1231,15 @@ export class TempestCommand extends EventEmitter<CommandEvents> {
         // Swallow — task may already be terminal.
       }
 
-      // 2) Drop it from in-flight bookkeeping so inFlight/activeDispatches shrink.
+      // 2) Drop it from in-flight bookkeeping so inFlight/activeDispatches shrink,
+      //    and remember it timed out so a LATE settle of the still-running promise
+      //    can be reconciled (a late success flips failed→completed) rather than
+      //    silently discarded. Only track a genuine timeout, not the wedge case
+      //    where the promise has already been severed from any real work.
       this.clearDispatch(taskId);
+      if (overTime) {
+        this.timedOutDispatches.add(taskId);
+      }
 
       // 3) Reset the wedged operator back to idle so it can pick up new work.
       operator?.abortActiveTask(reason);

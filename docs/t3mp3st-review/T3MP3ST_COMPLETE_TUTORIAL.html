@@ -1,0 +1,1547 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>T3MP3ST — Complete Operator Manual</title>
+<style>
+:root{
+  --bg:#0a0e14; --panel:#0f151f; --panel2:#141c28; --border:#1e2a3a;
+  --fg:#c7d2e0; --fg-dim:#8595a8; --accent:#00e5a0; --accent2:#3aa0ff;
+  --warn:#ffb020; --danger:#ff4d5e; --code-bg:#0b1119; --chip:#1b2534;
+  --ready:#00e5a0; --degraded:#ffb020; --blocked:#ff4d5e; --pending:#3aa0ff;
+  --approved:#00e5a0; --expired:#6b7787; --executing:#c084fc; --completed:#00e5a0; --failed:#ff4d5e;
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+a{color:var(--accent2);text-decoration:none}
+a:hover{text-decoration:underline}
+code,kbd,pre{font-family:"SF Mono",ui-monospace,"Cascadia Code",Menlo,Consolas,monospace}
+h1,h2,h3,h4{color:#eaf2fb;line-height:1.25;font-weight:650}
+h1{font-size:30px;margin:0 0 8px}
+h2{font-size:23px;margin:44px 0 12px;padding-top:12px;border-top:1px solid var(--border)}
+h3{font-size:18px;margin:28px 0 8px;color:var(--accent)}
+h4{font-size:15px;margin:18px 0 6px;color:#dbe6f2}
+p{margin:10px 0}
+hr{border:0;border-top:1px solid var(--border);margin:28px 0}
+
+/* layout */
+.layout{display:flex;min-height:100vh}
+.sidebar{width:310px;flex:0 0 310px;background:var(--panel);border-right:1px solid var(--border);position:sticky;top:0;height:100vh;overflow-y:auto;padding:18px 14px}
+.content{flex:1;min-width:0;max-width:1000px;margin:0 auto;padding:34px 42px 120px}
+.brand{font-size:19px;font-weight:800;letter-spacing:.5px;color:#fff;margin-bottom:2px}
+.brand span{color:var(--accent)}
+.brand-sub{font-size:11px;color:var(--fg-dim);margin-bottom:14px;letter-spacing:.4px}
+.search-box{width:100%;padding:9px 11px;background:var(--code-bg);border:1px solid var(--border);border-radius:8px;color:var(--fg);font-size:13px;margin-bottom:12px}
+.search-box:focus{outline:none;border-color:var(--accent)}
+.toc{list-style:none;margin:0;padding:0;font-size:13px}
+.toc li{margin:1px 0}
+.toc a{display:block;padding:4px 9px;border-radius:6px;color:var(--fg-dim)}
+.toc a:hover{background:var(--chip);color:var(--fg);text-decoration:none}
+.toc .toc-group{margin-top:12px;padding:4px 9px;font-size:10.5px;text-transform:uppercase;letter-spacing:1px;color:var(--accent2);font-weight:700}
+.toc a.hidden{display:none}
+
+/* boxes */
+.box{border:1px solid var(--border);border-radius:10px;padding:14px 16px;margin:16px 0;background:var(--panel2)}
+.box .box-title{font-weight:700;margin-bottom:4px;font-size:14px}
+.info{border-left:3px solid var(--accent2)}
+.info .box-title{color:var(--accent2)}
+.warn{border-left:3px solid var(--warn)}
+.warn .box-title{color:var(--warn)}
+.danger{border-left:3px solid var(--danger)}
+.danger .box-title{color:var(--danger)}
+.ok{border-left:3px solid var(--accent)}
+.ok .box-title{color:var(--accent)}
+
+/* code */
+pre{background:var(--code-bg);border:1px solid var(--border);border-radius:10px;padding:0;margin:14px 0;overflow:auto;position:relative}
+pre code{display:block;padding:14px 16px;font-size:13px;color:#d8e2ee;white-space:pre;overflow-x:auto}
+p code,li code,td code{background:var(--chip);padding:1.5px 6px;border-radius:5px;font-size:12.5px;color:#9fe8cf}
+.cmd-card{margin:14px 0}
+.cmd-head{display:flex;align-items:center;gap:8px;background:var(--panel2);border:1px solid var(--border);border-bottom:0;border-radius:10px 10px 0 0;padding:8px 14px;font-size:12px;color:var(--fg-dim)}
+.cmd-head+pre{border-radius:0 0 10px 10px;margin-top:0}
+.copy-btn{margin-left:auto;background:var(--chip);border:1px solid var(--border);color:var(--fg-dim);border-radius:6px;padding:3px 10px;font-size:11px;cursor:pointer}
+.copy-btn:hover{color:var(--accent);border-color:var(--accent)}
+.copy-btn.copied{color:var(--accent);border-color:var(--accent)}
+
+/* badges */
+.badge{display:inline-block;padding:1.5px 8px;border-radius:20px;font-size:10.5px;font-weight:700;letter-spacing:.4px;text-transform:uppercase;vertical-align:middle}
+.b-project{background:rgba(0,229,160,.13);color:var(--accent);border:1px solid rgba(0,229,160,.35)}
+.b-git{background:rgba(240,80,80,.12);color:#ff8a95;border:1px solid rgba(240,80,80,.3)}
+.b-npm{background:rgba(203,60,60,.12);color:#ff9d9d;border:1px solid rgba(203,60,60,.3)}
+.b-linux{background:rgba(120,140,170,.14);color:#a9bcd6;border:1px solid rgba(120,140,170,.3)}
+.b-api{background:rgba(58,160,255,.13);color:var(--accent2);border:1px solid rgba(58,160,255,.35)}
+.b-optional{background:rgba(192,132,252,.13);color:#d0aaff;border:1px solid rgba(192,132,252,.35)}
+
+/* state badges */
+.st{display:inline-block;padding:1.5px 9px;border-radius:5px;font-size:11px;font-weight:700;letter-spacing:.5px}
+.st-ready{background:rgba(0,229,160,.14);color:var(--ready)}
+.st-degraded{background:rgba(255,176,32,.14);color:var(--degraded)}
+.st-blocked{background:rgba(255,77,94,.14);color:var(--blocked)}
+.st-pending{background:rgba(58,160,255,.14);color:var(--pending)}
+.st-approved{background:rgba(0,229,160,.14);color:var(--approved)}
+.st-expired{background:rgba(107,119,135,.18);color:var(--expired)}
+.st-executing{background:rgba(192,132,252,.14);color:var(--executing)}
+.st-completed{background:rgba(0,229,160,.14);color:var(--completed)}
+.st-failed{background:rgba(255,77,94,.14);color:var(--failed)}
+
+/* tables */
+table{border-collapse:collapse;width:100%;margin:16px 0;font-size:13px}
+th,td{border:1px solid var(--border);padding:8px 11px;text-align:left;vertical-align:top}
+th{background:var(--panel2);color:#dbe6f2;font-weight:650}
+tr:nth-child(even) td{background:rgba(255,255,255,.012)}
+
+/* source tags */
+.src{font-size:11.5px;color:var(--fg-dim);font-family:ui-monospace,monospace}
+.src::before{content:"⤷ source: ";color:var(--accent);opacity:.7}
+.tag{font-size:10px;font-weight:700;letter-spacing:.5px;padding:1px 6px;border-radius:4px;text-transform:uppercase}
+.t-doc{background:rgba(58,160,255,.12);color:#7cc0ff}
+.t-impl{background:rgba(0,229,160,.12);color:var(--accent)}
+.t-default{background:rgba(107,119,135,.16);color:#9fb0c4}
+.t-rec{background:rgba(192,132,252,.12);color:#d0aaff}
+.t-example{background:rgba(255,176,32,.12);color:var(--warn)}
+
+/* collapsible */
+details{border:1px solid var(--border);border-radius:10px;margin:14px 0;background:var(--panel2)}
+details>summary{cursor:pointer;padding:11px 15px;font-weight:600;color:#dbe6f2;list-style:none}
+details>summary::-webkit-details-marker{display:none}
+details>summary::before{content:"▸ ";color:var(--accent)}
+details[open]>summary::before{content:"▾ "}
+details>summary:hover{color:var(--accent)}
+details .details-body{padding:0 15px 12px}
+
+/* decision tree / flow */
+.flow{background:var(--code-bg);border:1px solid var(--border);border-radius:10px;padding:16px;margin:16px 0;font-family:ui-monospace,monospace;font-size:12.5px;color:#bcd0e6;white-space:pre;overflow-x:auto;line-height:1.5}
+
+.backtop{position:fixed;right:22px;bottom:22px;background:var(--accent);color:#04140d;border:none;border-radius:50%;width:46px;height:46px;font-size:20px;cursor:pointer;box-shadow:0 4px 16px rgba(0,0,0,.4);opacity:0;pointer-events:none;transition:opacity .2s}
+.backtop.show{opacity:1;pointer-events:auto}
+
+.section{scroll-margin-top:20px}
+.lead{font-size:16px;color:var(--fg-dim);margin:6px 0 20px}
+.kv{font-size:13px}
+.kv b{color:#dbe6f2}
+.no-results{color:var(--warn);padding:8px;display:none}
+
+@media(max-width:900px){
+  .sidebar{position:fixed;left:-320px;z-index:50;transition:left .25s;box-shadow:4px 0 24px rgba(0,0,0,.5)}
+  .sidebar.open{left:0}
+  .content{padding:20px 18px 100px}
+  .menu-toggle{display:inline-flex!important}
+}
+.menu-toggle{display:none;position:fixed;top:14px;left:14px;z-index:60;background:var(--accent);color:#04140d;border:none;border-radius:8px;width:42px;height:42px;font-size:20px;cursor:pointer;align-items:center;justify-content:center}
+</style>
+</head>
+<body>
+<button class="menu-toggle" onclick="document.querySelector('.sidebar').classList.toggle('open')">☰</button>
+<div class="layout">
+<nav class="sidebar" id="sidebar">
+  <div class="brand">T3<span>MP3</span>ST</div>
+  <div class="brand-sub">COMPLETE OPERATOR MANUAL · commit afc9dad · develop</div>
+  <input class="search-box" id="tocSearch" placeholder="Filter sections… (/)" oninput="filterToc(this.value)">
+  <div class="no-results" id="noResults">No matching sections</div>
+  <ul class="toc" id="toc">
+    <li class="toc-group">Orientation</li>
+    <li><a href="#p1">1 · T3MP3ST in 5 minutes</a></li>
+    <li class="toc-group">Install &amp; configure</li>
+    <li><a href="#p2">2 · Prerequisites</a></li>
+    <li><a href="#p3">3 · Get it from Git</a></li>
+    <li><a href="#p4">4 · First installation</a></li>
+    <li><a href="#p5">5 · Configuration reference</a></li>
+    <li><a href="#p6">6 · State persistence</a></li>
+    <li><a href="#p7">7 · Host / network binding</a></li>
+    <li><a href="#p8">8 · Config profiles</a></li>
+    <li><a href="#p9">9 · Env files &amp; precedence</a></li>
+    <li class="toc-group">Build &amp; run</li>
+    <li><a href="#p10">10 · npm script reference</a></li>
+    <li><a href="#p11">11 · npx / CLI reference</a></li>
+    <li><a href="#p12">12 · Building</a></li>
+    <li><a href="#p13">13 · Development mode</a></li>
+    <li><a href="#p14">14 · Running the server</a></li>
+    <li><a href="#p15">15 · Startup checklist</a></li>
+    <li><a href="#p16">16 · Verify it's running</a></li>
+    <li><a href="#p17">17 · Stopping</a></li>
+    <li><a href="#p18">18 · Restarting</a></li>
+    <li class="toc-group">Update &amp; maintain</li>
+    <li><a href="#p19">19 · Pull latest from Git</a></li>
+    <li><a href="#p20">20 · Update+rebuild runbook</a></li>
+    <li><a href="#p22">22 · Rollback</a></li>
+    <li><a href="#p23">23 · State backup</a></li>
+    <li class="toc-group">Interfaces</li>
+    <li><a href="#p24">24 · UI guide (War Room)</a></li>
+    <li><a href="#p26">26 · When to use the API</a></li>
+    <li><a href="#p27">27 · API basics</a></li>
+    <li><a href="#p28">28 · API reference</a></li>
+    <li><a href="#p30">30 · Approval API</a></li>
+    <li><a href="#p32">32 · UI vs API vs CLI</a></li>
+    <li class="toc-group">Concepts</li>
+    <li><a href="#p33">33 · Core mental model</a></li>
+    <li><a href="#p34">34 · Admiral &amp; Op Admiral</a></li>
+    <li><a href="#p35">35 · Mission Gate</a></li>
+    <li><a href="#p37">37 · OPSEC reference</a></li>
+    <li><a href="#p39">39 · Work orders</a></li>
+    <li><a href="#p40">40 · Agents &amp; tools</a></li>
+    <li><a href="#p41">41 · Receipts &amp; evidence</a></li>
+    <li class="toc-group">Bug bounty</li>
+    <li><a href="#p42">42 · Full worked example</a></li>
+    <li><a href="#p43">43 · Research doctrine</a></li>
+    <li><a href="#p44">44 · BH toolkit integration</a></li>
+    <li><a href="#p45">45 · Daily workflow</a></li>
+    <li class="toc-group">Cheat sheets</li>
+    <li><a href="#p46">46 · Daily command cheat sheet</a></li>
+    <li><a href="#p47">47 · Fresh install cheat sheet</a></li>
+    <li><a href="#p48">48 · Update cheat sheet</a></li>
+    <li class="toc-group">Troubleshooting</li>
+    <li><a href="#p50">50 · Install problems</a></li>
+    <li><a href="#p51">51 · Runtime problems</a></li>
+    <li><a href="#p52">52 · Git update problems</a></li>
+    <li><a href="#p53">53 · Mission problems</a></li>
+    <li><a href="#p54">54 · Approval problems</a></li>
+    <li><a href="#p55">55 · Execution problems</a></li>
+    <li class="toc-group">Security &amp; reference</li>
+    <li><a href="#p56">56 · Control-plane security</a></li>
+    <li><a href="#p58">58 · Data &amp; state safety</a></li>
+    <li><a href="#p59">59 · Source code map</a></li>
+    <li><a href="#p60">60 · Docs vs implementation</a></li>
+    <li><a href="#p61">61 · Known UX gaps</a></li>
+    <li><a href="#p62">62 · Quick decision guide</a></li>
+    <li><a href="#howto">▸ "How do I…?" index</a></li>
+  </ul>
+</nav>
+<main class="content" id="content">
+<h1>T3MP3ST — Complete Operator Manual</h1>
+<p class="lead">Install · Configure · Build · Operate · Update · Hunt · Troubleshoot. Every command, variable, path, and route below is verified against the repository at commit <code>afc9dad</code> (branch <code>develop</code>).</p>
+
+<div class="box info">
+  <div class="box-title">How to read this manual</div>
+  Command authority is labelled:
+  <span class="badge b-project">PROJECT COMMAND</span>
+  <span class="badge b-git">STANDARD GIT</span>
+  <span class="badge b-npm">STANDARD NPM</span>
+  <span class="badge b-linux">STANDARD LINUX</span>
+  <span class="badge b-api">API CALL</span>
+  <span class="badge b-optional">OPTIONAL PRACTICE</span><br>
+  Claim provenance is labelled:
+  <span class="tag t-doc">DOCUMENTED</span>
+  <span class="tag t-impl">IMPLEMENTED</span>
+  <span class="tag t-default">DEFAULT</span>
+  <span class="tag t-rec">RECOMMENDED</span>
+  <span class="tag t-example">EXAMPLE</span><br>
+  Source citations appear as <span class="src">src/server.ts:143</span>. Where a capability is absent, it is marked
+  <b style="color:var(--danger)">NOT CURRENTLY IMPLEMENTED</b> rather than invented.
+</div>
+
+<!-- ==== SECTIONS APPENDED BELOW ==== -->
+<section class="section" id="p1">
+<h2>1 · T3MP3ST in 5 minutes</h2>
+<p>T3MP3ST ("TEMPEST" — <em>Tactical Execution Multi-agent Platform for Elite Security Testing</em>) is a
+<b>single Node.js/TypeScript application</b> that orchestrates LLM-driven, evidence-disciplined security testing against
+<b>authorized</b> targets. <span class="src">package.json:1-3</span></p>
+
+<h3>The ten things to know</h3>
+<ol class="kv">
+<li><b>What it is:</b> one modular TypeScript monolith, run as an HTTP server, a CLI, or an MCP server — all wrapping the same engine. <span class="src">src/server.ts, src/cli.ts, src/mcp-server.ts</span></li>
+<li><b>Components:</b> an Express backend + a hand-authored browser SPA ("War Room") + an execution engine (<code>TempestCommand</code>) that drives Admiral (intake), Op General (planner), and the Arsenal (tools). <span class="src">src/index.ts, docs/index.html</span></li>
+<li><b>How they talk:</b> the SPA calls the backend over HTTP JSON at <code>http://127.0.0.1:3333</code>. There is no separate frontend server — the backend serves the UI as a static file. <span class="src">src/server.ts:7950-7952</span></li>
+<li><b>Where the UI lives:</b> <code>docs/index.html</code>, served at <code>/ui</code> (root <code>/</code> redirects there). <span class="src">src/server.ts:7950-7952</span></li>
+<li><b>Where the API lives:</b> ~129 routes under <code>/api/*</code> in <code>src/server.ts</code>.</li>
+<li><b>Where state is stored:</b> in-memory by default (lost on restart). Set <code>T3MP3ST_STATE_DIR</code> to persist to <code>state.json</code> + <code>events.jsonl</code>. <span class="src">src/server.ts:926-939</span></li>
+<li><b>How you launch it:</b> <code>npm run server</code> (dev) or <code>npm run build</code> then <code>npm run server:prod</code> (prod). <span class="src">package.json:24-25</span></li>
+<li><b>How a hunt flows:</b> intake (Admiral) → plan (Op General) → gate check → approval receipt → execution → evidence.</li>
+<li><b>How approvals work:</b> live actions require a per-<code>action:target</code> "receipt" (an <code>ApprovalRequest</code>). Missing → HTTP 403; you approve on the Scope Receipts page. <span class="src">src/server.ts:1319-1332, 5027</span></li>
+<li><b>Where results appear:</b> the War Room's Findings, Evidence Vault, Work Order Board, and Scope Receipts pages.</li>
+</ol>
+
+<h3>End-to-end flow (as-built)</h3>
+<div class="flow">Repository
+   │  git clone
+   ▼
+Install ───────────  npm ci  (or npm install)
+   │
+   ▼
+Configure ─────────  T3MP3ST_STATE_DIR, provider key / local agent, T3MP3ST_HOST/PORT
+   │
+   ▼
+Build / Start ─────  npm run build → npm run server:prod   (or npm run server for dev)
+   │
+   ▼
+Backend  (Express, 127.0.0.1:3333)  ── serves ──►  UI / War Room  (/ui  ← docs/index.html)
+   │
+   ▼
+Mission  (POST /api/mission/start  or  /api/admiral/launch)
+   │
+   ▼
+Admiral (intake, plan-only)  ──►  Op General (OpPlan: hunt lanes, work orders, RoE)
+   │
+   ▼
+Mission Gate  (reviewPlan)  ──►  READY / DEGRADED / HOLD          HOLD ⇒ HTTP 409
+   │
+   ▼
+Approval  (guardAction mission_execution:&lt;host&gt;)  ── missing ⇒ HTTP 403 + pending receipt
+   │
+   ▼
+Execution  (tick loop → OperatorAgent → Arsenal.execute → scope gate → tool)
+   │
+   ▼
+Receipts / Evidence / Findings  (War Room)</div>
+<div class="box warn"><div class="box-title">The #1 naming trap</div>
+The War Room's <b>"⭐ Op Admiral"</b> page drives the <b>Op General</b> (<code>/api/general/*</code>) — it is <b>not</b> the
+Admiral module. The <b>Admiral</b> is the separate chat-intake wizard ("⚓ Guided"). Keep them distinct.
+<span class="src">docs/index.html nav; src/general/index.ts; src/admiral/index.ts</span></div>
+<p><a href="#p33">→ Full mental model (Part 33)</a> · <a href="#p42">→ Complete bug-bounty walkthrough (Part 42)</a></p>
+</section>
+
+<section class="section" id="p2">
+<h2>2 · Prerequisites</h2>
+<div class="box info"><div class="box-title">Verified from the repository</div>
+The only hard version pin is Node. There is no <code>.nvmrc</code> and no <code>.tool-versions</code> in the repo (verified absent).
+The lockfile is <code>package-lock.json</code> (npm) — there is no <code>pnpm-lock.yaml</code> or <code>yarn.lock</code>.
+<span class="src">package.json:157-159; repo root listing</span></div>
+
+<table>
+<tr><th>Requirement</th><th>Needed?</th><th>Version</th><th>Source / notes</th></tr>
+<tr><td><b>Node.js</b></td><td>Required</td><td><code>&gt;=22.19.0</code></td><td><span class="tag t-impl">IMPLEMENTED</span> <code>engines.node</code> <span class="src">package.json:157-159</span></td></tr>
+<tr><td><b>npm</b></td><td>Required</td><td>bundled with Node 22</td><td>Uses <code>package-lock.json</code>; no explicit npm pin</td></tr>
+<tr><td><b>npx</b></td><td>Optional</td><td>bundled with npm</td><td>Only needed if you invoke the CLI via <code>npx t3mp3st</code></td></tr>
+<tr><td><b>TypeScript</b></td><td>Dev only</td><td><code>^5.3.3</code> (devDependency)</td><td>Installed by <code>npm install</code>; not a separate global <span class="src">package.json:153</span></td></tr>
+<tr><td><b>Git</b></td><td>Recommended</td><td>any recent</td><td>To clone/update the repo</td></tr>
+<tr><td><b>Docker</b></td><td>Optional</td><td>any recent + Compose</td><td>A <code>Dockerfile</code> + <code>docker-compose.yml</code> exist <span class="src">Dockerfile, docker-compose.yml</span></td></tr>
+<tr><td><b>curl / jq</b></td><td>Optional</td><td>any</td><td>For the API examples in this manual (STANDARD LINUX tools)</td></tr>
+<tr><td><b>Python</b></td><td>Not required</td><td>—</td><td>No Python in the runtime path (Node-only app)</td></tr>
+<tr><td><b>LLM access</b></td><td>One of</td><td>—</td><td>A provider API key <em>or</em> a connected local coding agent <em>or</em> a local model. See Part 5. <span class="src">src/config/index.ts:816-859; src/agent/local-agents.ts</span></td></tr>
+<tr><td><b>Security binaries</b> (nmap, nuclei, ffuf, sqlmap…)</td><td>Optional</td><td>—</td><td>Only if you use external tool adapters; they degrade gracefully when absent <span class="src">src/arsenal/index.ts:3253-3260</span></td></tr>
+</table>
+
+<h3>Verify your toolchain</h3>
+<div class="cmd-card"><div class="cmd-head"><span class="badge b-linux">STANDARD LINUX</span> Check versions <button class="copy-btn" onclick="copyCmd(this)">copy</button></div>
+<pre><code>node --version   # must be >= 22.19.0
+npm --version
+git --version
+npx --version    # only if you plan to use the CLI via npx</code></pre></div>
+<div class="box warn"><div class="box-title">If Node is older than 22.19</div>
+<code>npm install</code>/<code>npm ci</code> may still run, but the app targets Node 22 APIs and ESM. Upgrade Node (e.g. via <code>nvm install 22</code>) before proceeding.</div>
+</section>
+
+<section class="section" id="p3">
+<h2>3 · Getting T3MP3ST from Git</h2>
+<div class="box info"><div class="box-title">Verified repository metadata</div>
+Remote (from <code>git remote -v</code>): <code>git@github.com:eddocg/T3MP3ST.git</code>.
+Current branch: <code>develop</code>. Current commit: <code>afc9dad</code>. The stated upstream in <code>package.json</code> is
+<code>github.com/elder-plinius/t3mp3st</code>. <span class="src">git remote -v; git branch --show-current; package.json:116-119</span></div>
+
+<div class="cmd-card"><div class="cmd-head"><span class="badge b-git">STANDARD GIT</span> Clone &amp; enter <button class="copy-btn" onclick="copyCmd(this)">copy</button></div>
+<pre><code># Use the remote your team gives you. From this working copy it is:
+git clone git@github.com:eddocg/T3MP3ST.git
+cd T3MP3ST</code></pre></div>
+
+<h3>Inspect what you cloned</h3>
+<div class="cmd-card"><div class="cmd-head"><span class="badge b-git">STANDARD GIT</span> Orientation <button class="copy-btn" onclick="copyCmd(this)">copy</button></div>
+<pre><code>git remote -v            # where the code comes from
+git branch --show-current # which branch you're on (expected: develop or main)
+git status               # is the tree clean? uncommitted changes?
+git log -1 --oneline     # the exact commit you're running
+git rev-parse --short HEAD # short commit hash (record this)</code></pre></div>
+<table>
+<tr><th>Command</th><th>What it tells you</th></tr>
+<tr><td><code>git remote -v</code></td><td>The fetch/push URLs — confirms you cloned the intended repo</td></tr>
+<tr><td><code>git branch --show-current</code></td><td>Active branch. This working copy tracks <code>develop</code>; the project's main branch is <code>main</code></td></tr>
+<tr><td><code>git status</code></td><td>Whether the tree is clean. A clean tree makes updates (Part 19) safe with <code>--ff-only</code></td></tr>
+<tr><td><code>git log -1 --oneline</code> / <code>git rev-parse --short HEAD</code></td><td>The commit you are actually running — record it so you can correlate behavior and roll back (Part 22)</td></tr>
+</table>
+</section>
+
+<section class="section" id="p4">
+<h2>4 · First installation</h2>
+<div class="box info"><div class="box-title">Which install command?</div>
+This is a <b>single-package</b> project (one <code>package.json</code>, no workspaces) with a committed
+<code>package-lock.json</code>. Both commands work; choose by intent:
+<span class="src">package.json; package-lock.json present</span></div>
+<table>
+<tr><th>Command</th><th>Use when</th><th>Behavior</th></tr>
+<tr><td><span class="badge b-npm">STANDARD NPM</span> <code>npm ci</code></td><td>Reproducible installs, CI, after pulling updates</td><td>Installs <em>exactly</em> the lockfile; wipes <code>node_modules</code> first; fails if <code>package.json</code> and the lock disagree. This is what the Dockerfile uses. <span class="src">Dockerfile:22</span></td></tr>
+<tr><td><span class="badge b-npm">STANDARD NPM</span> <code>npm install</code></td><td>Local development, first try</td><td>Installs deps and may update the lockfile if versions drift</td></tr>
+</table>
+
+<div class="cmd-card"><div class="cmd-head"><span class="badge b-npm">STANDARD NPM</span> Recommended first install <button class="copy-btn" onclick="copyCmd(this)">copy</button></div>
+<pre><code>npm ci        # reproducible; matches package-lock.json exactly</code></pre></div>
+
+<h4>What it does &amp; how to verify</h4>
+<ul>
+<li><b>What:</b> downloads all dependencies into <code>node_modules/</code> (incl. dev deps like <code>typescript</code>, <code>tsx</code>, <code>vitest</code>).</li>
+<li><b>Expected result:</b> an <code>added N packages</code> summary with no <code>ERR!</code> lines and a fresh <code>node_modules/</code>.</li>
+<li><b>Verify:</b> <code>npx tsc --version</code> prints a 5.x version (proves the dev toolchain installed).</li>
+</ul>
+<details><div class="details-body">
+<summary>Common install errors</summary>
+<table>
+<tr><th>Error</th><th>Cause / fix</th></tr>
+<tr><td><code>EBADENGINE</code> / engine warning</td><td>Node &lt; 22.19. Upgrade Node.</td></tr>
+<tr><td><code>npm ci</code> fails: "lock file … out of sync"</td><td><code>package.json</code> and <code>package-lock.json</code> disagree — you edited deps. Use <code>npm install</code> to reconcile, or restore the lockfile.</td></tr>
+<tr><td>native build failures (musl vs glibc)</td><td>Don't copy <code>node_modules</code> between host and container — the <code>.dockerignore</code> excludes it for exactly this reason. <span class="src">.dockerignore</span></td></tr>
+</table>
+</div></details>
+</section>
+
+<section class="section" id="p5">
+<h2>5 · Complete configuration reference</h2>
+<div class="box info"><div class="box-title">How this table was built</div>
+Every row is a variable the code <b>actually reads</b> (via <code>process.env.NAME</code> or <code>process.env[map]</code>),
+harvested directly from <code>src/**/*.ts</code>. Provider keys are read through a map in <code>getApiKey()</code>, not by literal
+<code>process.env.ANTHROPIC_API_KEY</code> — but the effective names are shown. <span class="src">src/config/index.ts:825-855</span></div>
+
+<h3>Core server / runtime</h3>
+<table>
+<tr><th>Variable</th><th>Req</th><th>Default</th><th>Component</th><th>Purpose</th><th>Security</th></tr>
+<tr><td><code>T3MP3ST_PORT</code></td><td>No</td><td><span class="tag t-default">DEFAULT</span> <code>3333</code></td><td>server</td><td>HTTP listen port</td><td>—</td></tr>
+<tr><td><code>T3MP3ST_HOST</code></td><td>No</td><td><code>127.0.0.1</code> (or <code>0.0.0.0</code> if <code>DOCKER=true</code>)</td><td>server</td><td>Bind address</td><td><b style="color:var(--danger)">High</b> — see Part 7</td></tr>
+<tr><td><code>DOCKER</code></td><td>No</td><td>unset</td><td>server</td><td><code>=true</code> flips the default bind to <code>0.0.0.0</code></td><td>High (via host)</td></tr>
+<tr><td><code>T3MP3ST_STATE_DIR</code></td><td>No</td><td>unset → <code>'memory'</code> (no persistence)</td><td>server</td><td>Directory for <code>state.json</code>/<code>events.jsonl</code></td><td>Low (path)</td></tr>
+<tr><td><code>T3MP3ST_MODE</code></td><td>No</td><td>unset</td><td>server</td><td>Mode label; note any truthy <code>T3MP3ST_STATE_DIR</code> also forces <code>'t3mp3st'</code> mode (precedence quirk)</td><td>—</td></tr>
+</table>
+<p class="src">src/server.ts:143 (PORT) · src/server.ts:152 (HOST/DOCKER) · src/server.ts:923-939 (STATE_DIR/MODE)</p>
+
+<h3>LLM providers &amp; models</h3>
+<table>
+<tr><th>Variable</th><th>Req</th><th>Default</th><th>Purpose</th><th>Security</th></tr>
+<tr><td><code>OPENROUTER_API_KEY</code></td><td rowspan="9">≥1 provider, unless using a local agent/model</td><td>none</td><td>OpenRouter key (default backbone)</td><td rowspan="9"><b>Secret</b></td></tr>
+<tr><td><code>VENICE_API_KEY</code></td><td>none</td><td>Venice key</td></tr>
+<tr><td><code>ANTHROPIC_API_KEY</code></td><td>none</td><td>Anthropic key</td></tr>
+<tr><td><code>OPENAI_API_KEY</code></td><td>none</td><td>OpenAI key</td></tr>
+<tr><td><code>XAI_API_KEY</code></td><td>none</td><td>xAI / Grok key</td></tr>
+<tr><td><code>GEMINI_API_KEY</code></td><td>none</td><td>Google Gemini key</td></tr>
+<tr><td><code>DEEPSEEK_API_KEY</code></td><td>none</td><td>DeepSeek key</td></tr>
+<tr><td><code>NANOGPT_API_KEY</code></td><td>none</td><td>NanoGPT key</td></tr>
+<tr><td><code>LITELLM_API_KEY</code></td><td>none</td><td>LiteLLM proxy key</td></tr>
+<tr><td><code>HF_TOKEN</code> (aliases <code>HUGGINGFACE_API_KEY</code>, <code>HUGGINGFACE_TOKEN</code>, <code>HUGGINGFACEHUB_API_TOKEN</code>)</td><td>No</td><td>none</td><td>Hugging Face token</td><td>Secret</td></tr>
+<tr><td><code>ZAI_API_KEY</code> / <code>ZHIPUAI_API_KEY</code> / <code>TEMPEST_LOCAL_API_KEY</code></td><td>No</td><td>none</td><td>Bearer for the self-hosted <code>local</code> provider</td><td>Secret</td></tr>
+<tr><td><code>TEMPEST_DEFAULT_PROVIDER</code> / <code>LLM_PROVIDER</code></td><td>No</td><td>stored default</td><td>Default provider override</td><td>—</td></tr>
+<tr><td><code>TEMPEST_LOCAL_BASE_URL</code> / <code>TEMPEST_LOCAL_MODEL</code> / <code>TEMPEST_LOCAL_TIMEOUT</code></td><td>No</td><td><code>http://localhost:11434/api</code> · <code>llama3</code> · 120000ms floor</td><td>Local inference server</td><td>—</td></tr>
+<tr><td><code>LITELLM_BASE_URL</code> / <code>LITELLM_MODEL</code></td><td>No</td><td><code>http://localhost:4000/v1</code> · <code>gpt-4o</code></td><td>LiteLLM proxy routing</td><td>—</td></tr>
+<tr><td><code>TEMPEST_MODEL_FALLBACK</code></td><td>No</td><td>off</td><td>Enables cross-provider fallback ladder</td><td>—</td></tr>
+<tr><td><code>TEMPEST_ORCHESTRATOR_PROVIDER/MODEL</code>, <code>TEMPEST_WORKER_PROVIDER/MODEL</code></td><td>No</td><td>model defaults <code>anthropic/claude-opus-4.8</code>, <code>anthropic/claude-fable-5</code></td><td>Whitebox decomposition master/worker models</td><td>—</td></tr>
+</table>
+<p class="src">src/config/index.ts:825-855, 882, 962-963, 1008-1035, 1051-1076 · src/recon/whitebox.ts:296-300</p>
+
+<h3>Safety / capability flags <span class="badge b-optional">EXPERT-ONLY</span></h3>
+<table>
+<tr><th>Variable</th><th>Default</th><th>Effect</th><th>Security</th></tr>
+<tr><td><code>T3MP3ST_FULL_ARSENAL</code></td><td>off</td><td>Arms the 76-entry specialist adapter arsenal (incl. metasploit/hydra drivers)</td><td><b>High blast radius</b></td></tr>
+<tr><td><code>T3MP3ST_GATE_BUILTINS</code></td><td>off</td><td>Routes intrusive built-ins (sqli/xss/spray/hash) through the approval gate</td><td>Safety (tightening)</td></tr>
+<tr><td><code>T3MP3ST_APPROVED_TOOLS</code></td><td><code>''</code></td><td>Comma list pre-authorizing tools — bypasses interactive approval; a tool <em>not</em> listed is denied in headless mode</td><td><b style="color:var(--danger)">Silently authorizes dangerous tools</b></td></tr>
+<tr><td><code>T3MP3ST_HERMES_YOLO</code></td><td>off</td><td>Enables Hermes CLI <code>--yolo</code> (auto-approve, unattended exec)</td><td><b style="color:var(--danger)">Disables a confirmation gate</b></td></tr>
+<tr><td><code>T3MP3ST_FORCE_UNCONFIGURED</code></td><td>off</td><td>Forces "no key" state for smoke-testing fail-closed paths</td><td>Test-only</td></tr>
+<tr><td><code>T3MP3ST_DISABLE_LOCAL_AGENTS</code></td><td>off</td><td>Skips local coding-agent detection (CI hook)</td><td>Test-only</td></tr>
+</table>
+<p class="src">src/index.ts:388, 399, 423 · src/agent/local-agents.ts:205, 398 · src/config/index.ts:842</p>
+
+<h3>Targeting, network, tuning</h3>
+<table>
+<tr><th>Variable</th><th>Default</th><th>Purpose</th><th>Security</th></tr>
+<tr><td><code>TEMPEST_TARGET_ORIGIN</code> + <code>TEMPEST_TARGET_HEADERS</code></td><td>none</td><td>Inject auth headers into requests to the <em>exact</em> origin (same-origin only; stripped across redirects)</td><td><b>Secret</b> (headers carry live tokens)</td></tr>
+<tr><td><code>TEMPEST_PROXY_URL</code></td><td>none</td><td>Outbound SOCKS5 proxy</td><td>May embed creds</td></tr>
+<tr><td><code>GITHUB_TOKEN</code> / <code>T3MP3ST_GITHUB_TOKEN</code></td><td>none</td><td>GitHub PAT for whitebox clone / bench fetch</td><td>Secret</td></tr>
+<tr><td><code>T3MP3ST_REPO_ROOT</code></td><td><code>homedir()</code></td><td>Path-containment boundary for local whitebox analysis</td><td>Path boundary</td></tr>
+<tr><td><code>T3MP3ST_LLM_CONCURRENCY</code></td><td><code>2</code></td><td>Max concurrent local-agent dispatches</td><td>—</td></tr>
+<tr><td><code>T3MP3ST_TASK_TIMEOUT_MS</code></td><td><code>300000</code> (5 min; 1.8M ms for local-agent)</td><td>Per-task LLM backstop timeout</td><td>—</td></tr>
+<tr><td><code>T3MP3ST_LOCAL_AGENT_MAX_ITERATIONS</code></td><td><code>30</code></td><td>Max ReAct iterations for a local agent</td><td>—</td></tr>
+<tr><td><code>T3MP3ST_LOCAL_AGENT_HEALTH_TIMEOUT_MS</code></td><td>(numeric)</td><td>Local-agent liveness probe timeout</td><td>—</td></tr>
+<tr><td><code>T3MP3ST_SWARM_COORD</code> / <code>T3MP3ST_SWARM_MAX_FOLLOWUPS</code></td><td>off / <code>24</code></td><td>Finding→follow-up refinement loop &amp; its cap</td><td>—</td></tr>
+<tr><td><code>T3MP3ST_AGENT_HOME</code></td><td>unset</td><td>Explicit HOME override for local-agent discovery</td><td>—</td></tr>
+</table>
+<p class="src">src/arsenal/index.ts:87-88 · src/config/index.ts:803 · src/recon/whitebox.ts:108,198 · src/pack/health.ts:179 · src/index.ts:277,356,360,909 · src/agent/local-agents.ts:47</p>
+
+<div class="box warn"><div class="box-title">Dead / non-app variables in <code>.env.example</code></div>
+<code>LLM_MODEL</code>, <code>GROQ_API_KEY</code>, <code>TOGETHER_API_KEY</code>, <code>REPLICATE_API_TOKEN</code> appear in
+<code>.env.example</code> but are <b>not read by the application</b> (only by helper scripts like <code>scripts/keys.sh</code>).
+Conversely, most <code>T3MP3ST_*</code> flags above are <b>undocumented</b> in <code>.env.example</code>. <span class="src">.env.example vs src/</span></div>
+</section>
+
+<section class="section" id="p6">
+<h2>6 · State persistence (<code>T3MP3ST_STATE_DIR</code>)</h2>
+<div class="box danger"><div class="box-title">Default = no persistence</div>
+With <code>T3MP3ST_STATE_DIR</code> unset, <code>stateRoot()</code> returns the literal string <code>'memory'</code> and
+<b>every mission, approval, receipt, and piece of evidence is lost on restart</b>. Set it for any real engagement.
+<span class="src">src/server.ts:926-929</span></div>
+
+<table>
+<tr><th>Question</th><th>Answer (verified)</th></tr>
+<tr><td>What does it control?</td><td>The root directory for persisted server state. <span class="src">src/server.ts:926</span></td></tr>
+<tr><td>What files are stored?</td><td><code>state.json</code> (all ledgers) and <code>events.jsonl</code> (event log). <span class="src">src/server.ts:931-939</span></td></tr>
+<tr><td>When created?</td><td>On the first debounced write (1000 ms after a state change). <span class="src">src/server.ts:1127-1143</span></td></tr>
+<tr><td>What survives restart?</td><td>All 11 ledgers — missions, approvals, evidence, findings, hypotheses, work orders, etc. — reloaded at boot by <code>loadPersistedState()</code>. <span class="src">src/server.ts:1164-1187</span></td></tr>
+<tr><td>What is ephemeral?</td><td>Everything, if the dir is unset. Also the tool-tier <code>ApprovalController</code> state is process-lifetime only (never persisted).</td></tr>
+<tr><td>Can two instances share it?</td><td><b>Not recommended.</b> Writes are last-writer-wins snapshots of in-memory Maps; two servers would clobber each other. <span class="tag t-impl">IMPLEMENTED</span></td></tr>
+<tr><td>Auto-created if missing?</td><td>Writes create the file; ensure the parent directory is writable. Reads are silent on <code>ENOENT</code> (treated as first run). <span class="src">src/server.ts:1164-1187</span></td></tr>
+<tr><td>What if deleted?</td><td>Next boot starts empty (fresh state); a running server keeps its in-memory copy until the next write recreates the file.</td></tr>
+</table>
+
+<h3>Setting it</h3>
+<div class="cmd-card"><div class="cmd-head"><span class="badge b-linux">STANDARD LINUX</span> One-command (this run only) <button class="copy-btn" onclick="copyCmd(this)">copy</button></div>
+<pre><code>T3MP3ST_STATE_DIR="$HOME/.t3mp3st/state" npm run server</code></pre></div>
+<div class="cmd-card"><div class="cmd-head"><span class="badge b-linux">STANDARD LINUX</span> Exported (whole shell session) <button class="copy-btn" onclick="copyCmd(this)">copy</button></div>
+<pre><code>export T3MP3ST_STATE_DIR="$HOME/.t3mp3st/state"
+npm run server
+# verify the server is using it:
+curl -sS http://127.0.0.1:3333/api/health | jq '.storage'</code></pre></div>
+<div class="box info"><div class="box-title">Verify which directory is in use</div>
+<code>GET /api/health</code> reports <code>storage.driver</code> (<code>memory</code> vs <code>filesystem</code>),
+<code>storage.path</code>, and <code>storage.stateFile</code>. <span class="src">src/server.ts:4417-4423</span></div>
+<div class="box warn"><div class="box-title">Persistent config</div>
+To make it permanent, add the <code>export</code> line to your shell profile (<code>~/.zshrc</code> / <code>~/.bashrc</code>) or the
+Docker Compose <code>environment:</code> block. Do <b>not</b> put secret keys on the command line where they land in shell history —
+prefer a <code>.env</code> file (Part 9) or the setup wizard's stored config.</div>
+<h3>Backup / move</h3>
+<p>Because state is a plain <code>state.json</code>, backing up = copying that file. See Part 23 for the safe (stop-first) procedure.
+Moving = point <code>T3MP3ST_STATE_DIR</code> at a new path and copy <code>state.json</code>/<code>events.jsonl</code> there while the server is stopped.</p>
+</section>
+
+<section class="section" id="p7">
+<h2>7 · <code>T3MP3ST_HOST</code> / network binding</h2>
+<div class="box danger"><div class="box-title">This is a command-executing local API</div>
+The backend can run tools and subprocesses. It has <b>no built-in authentication</b> — its safety model is "loopback only."
+Exposing it to a network without a real auth layer in front hands remote parties a command-execution surface.
+<span class="src">src/server.ts:144-158 (security comment)</span></div>
+
+<table>
+<tr><th>Aspect</th><th>Value (verified)</th></tr>
+<tr><td>Variable</td><td><code>T3MP3ST_HOST</code></td></tr>
+<tr><td>Default</td><td><code>127.0.0.1</code> — or <code>0.0.0.0</code> when <code>DOCKER=true</code></td></tr>
+<tr><td>Format</td><td>An IP/hostname string passed to <code>app.listen(PORT, HOST)</code>. IPv4 (<code>127.0.0.1</code>, <code>0.0.0.0</code>) and IPv6 (<code>::1</code>) are recognized by the loopback test</td></tr>
+<tr><td>Loopback detection</td><td>Regex <code>/^(127\.|localhost$|::1$|\[::1\]$)/i</code> decides <code>HOST_IS_LOOPBACK</code></td></tr>
+<tr><td>Host-header guard</td><td>The Host-header allowlist is enforced <b>only</b> when bound to loopback. Explicitly binding to a non-loopback address <b>disables</b> that guard (you've opted into network exposure)</td></tr>
+</table>
+<p class="src">src/server.ts:152, 158, and the CORS/origin-guard block that follows</p>
+
+<div class="flow">127.0.0.1  →  reachable only from this machine        ✅ SAFE DEFAULT
+             Host-header allowlist ACTIVE (anti-CSRF / DNS-rebind)
+
+0.0.0.0    →  reachable from the LAN / anywhere routable    ⚠️ DANGER
+             Host-header guard DISABLED · no auth · runs commands</div>
+
+<div class="box warn"><div class="box-title">Do not expose it</div>
+Keep the default loopback bind unless you deliberately front it with authentication (e.g. an authenticated reverse proxy / VPN).
+The Docker image sets <code>DOCKER=true</code> → binds <code>0.0.0.0</code> <em>inside the container</em>, but
+<code>docker-compose.yml</code> publishes the port as <code>127.0.0.1:3333:3333</code>, so it stays loopback-only on the host.
+<span class="src">Dockerfile (ENV DOCKER=true); docker-compose.yml (ports)</span></div>
+
+<h3>Port</h3>
+<p><code>T3MP3ST_PORT</code> <span class="tag t-default">DEFAULT</span> <code>3333</code>. Change it the same way as the host.
+<span class="src">src/server.ts:143</span></p>
+</section>
+
+<section class="section" id="p8">
+<h2>8 · Configuration profiles <span class="tag t-rec">RECOMMENDED</span></h2>
+<p>Each profile uses only verified variables. Values marked <span class="tag t-example">EXAMPLE</span> are illustrative paths.</p>
+
+<h3>Local default (recommended start)</h3>
+<div class="cmd-card"><div class="cmd-head"><span class="badge b-linux">STANDARD LINUX</span><button class="copy-btn" onclick="copyCmd(this)">copy</button></div>
+<pre><code># No env needed beyond an LLM key or a connected local agent.
+npm run server
+# → http://127.0.0.1:3333/ui</code></pre></div>
+
+<h3>Persistent state (recommended for real work)</h3>
+<div class="cmd-card"><div class="cmd-head"><span class="badge b-linux">STANDARD LINUX</span><button class="copy-btn" onclick="copyCmd(this)">copy</button></div>
+<pre><code>export T3MP3ST_STATE_DIR="$HOME/.t3mp3st/state"
+npm run server</code></pre></div>
+
+<h3>Alternate port</h3>
+<div class="cmd-card"><div class="cmd-head"><span class="badge b-linux">STANDARD LINUX</span><button class="copy-btn" onclick="copyCmd(this)">copy</button></div>
+<pre><code>T3MP3ST_PORT=8080 npm run server
+# → http://127.0.0.1:8080/ui</code></pre></div>
+
+<h3>Development (auto-reload via tsx)</h3>
+<div class="cmd-card"><div class="cmd-head"><span class="badge b-npm">STANDARD NPM</span><button class="copy-btn" onclick="copyCmd(this)">copy</button></div>
+<pre><code>npm run server        # tsx src/server.ts — runs TS directly, no build step</code></pre></div>
+
+<h3>Full arsenal (expert; higher blast radius)</h3>
+<div class="cmd-card"><div class="cmd-head"><span class="badge b-linux">STANDARD LINUX</span><button class="copy-btn" onclick="copyCmd(this)">copy</button></div>
+<pre><code>export T3MP3ST_FULL_ARSENAL=1      # arms specialist adapters (needs the binaries installed)
+export T3MP3ST_GATE_BUILTINS=1     # also gate intrusive built-ins behind approval
+export T3MP3ST_STATE_DIR="$HOME/.t3mp3st/state"
+npm run server</code></pre></div>
+<div class="box info"><div class="box-title">No dedicated "debug" flag</div>
+There is <b>no</b> <code>DEBUG</code>/<code>NODE_ENV=development</code> switch consumed by the app (verified — <code>NODE_ENV</code>
+is not read in <code>src/</code>). "Debugging" in practice means running the dev server (<code>npm run server</code>) and reading its console output.</div>
+</section>
+
+<section class="section" id="p9">
+<h2>9 · Env files &amp; precedence</h2>
+<div class="box info"><div class="box-title">Verified loader behavior</div>
+Config is a <code>Conf</code> JSON store, not a flat <code>.env</code> reader. At startup <code>loadEnvVariables()</code> loads
+<code>~/.t3mp3st/.env</code> or <code>~/.env</code> — <b>deliberately not <code>./.env</code> in the working directory</b>, to avoid
+slurping a scanned target's secrets. It only fills keys that are <b>unset</b>; a real exported env var always wins.
+<span class="src">src/config/index.ts:714-766 (esp. 717-719, 743)</span></div>
+
+<h3>Precedence (highest → lowest)</h3>
+<div class="flow">1. process.env         (real exported environment)        ← always wins
+2. ~/.t3mp3st/.env  or  ~/.env   (home-dir file, fills unset keys only)
+3. Conf store       (~/.t3mp3st/… written by `npm run setup`)
+4. DEFAULT_SETTINGS (hardcoded)</div>
+<p class="src">src/config/index.ts:136-226 (defaults), 693-766 (store + env load), 816-859 (key resolution)</p>
+
+<div class="box warn"><div class="box-title">Docker is the exception</div>
+<code>docker-compose.yml</code> uses <code>env_file: .env</code>, so in the container a project-root <code>.env</code> <em>is</em>
+loaded (by Compose, not by the app's loader). <span class="src">docker-compose.yml</span></div>
+
+<h3>Safe <code>.env</code> template</h3>
+<p>Copy <code>.env.example</code> → <code>.env</code> (git-ignored via <code>.dockerignore</code>/<code>.gitignore</code>). Never commit real secrets.</p>
+<div class="cmd-card"><div class="cmd-head"><span class="badge b-linux">STANDARD LINUX</span> Minimal .env <button class="copy-btn" onclick="copyCmd(this)">copy</button></div>
+<pre><code># One provider key (or rely on a connected local agent instead)
+OPENROUTER_API_KEY=YOUR_API_KEY_HERE
+
+# Optional: persist state
+# T3MP3ST_STATE_DIR=/home/you/.t3mp3st/state
+
+# Optional: authenticated target testing (same-origin only)
+# TEMPEST_TARGET_ORIGIN=https://api.example.com
+# TEMPEST_TARGET_HEADERS={"Authorization":"Bearer YOUR_TOKEN_HERE"}</code></pre></div>
+<div class="box info"><div class="box-title">Or skip .env entirely</div>
+Run <code>npx t3mp3st setup</code> (Part 11) to store provider keys in the <code>Conf</code> store at <code>~/.t3mp3st/</code> —
+they persist across runs without living in a file you might commit.</div>
+</section>
+
+<section class="section" id="p10">
+<h2>10 · npm script reference</h2>
+<p>Every script below is verbatim from <code>package.json</code>'s <code>scripts</code> block.</p>
+<table>
+<tr><th>Script</th><th>Runs</th><th>Purpose</th></tr>
+<tr><td><code>npm run build</code></td><td><code>tsc</code></td><td>Compile <code>src/</code> → <code>dist/</code></td></tr>
+<tr><td><code>npm start</code></td><td><code>node dist/cli.js</code></td><td>Run the built CLI</td></tr>
+<tr><td><code>npm run dev</code></td><td><code>tsx src/cli.ts</code></td><td>Run the CLI from source (no build)</td></tr>
+<tr><td><code>npm run setup</code></td><td><code>tsx src/setup.ts</code></td><td>Configuration wizard</td></tr>
+<tr><td><code>npm run server</code></td><td><code>tsx src/server.ts</code></td><td>Dev HTTP server (no build)</td></tr>
+<tr><td><code>npm run server:prod</code></td><td><code>node dist/server.js</code></td><td>Built HTTP server (needs <code>build</code> first)</td></tr>
+<tr><td><code>npm run mcp</code></td><td><code>tsx src/mcp-server.ts</code></td><td>MCP server</td></tr>
+<tr><td><code>npm test</code></td><td><code>vitest run src && …</code></td><td>Run the test suite</td></tr>
+<tr><td><code>npm run lint</code></td><td><code>eslint src/**/*.ts</code></td><td>Lint TypeScript</td></tr>
+<tr><td><code>npm run typecheck</code></td><td><code>tsc --noEmit</code></td><td>Type-check without emitting</td></tr>
+</table>
+<p class="src">package.json (scripts)</p>
+<div class="box info"><div class="box-title">No <code>server</code> CLI subcommand</div>
+Starting the HTTP server is an <b>npm script</b>, not a CLI subcommand. The <code>t3mp3st</code> binary is for interactive
+sessions and configuration (Part 11). <span class="src">src/cli.ts</span></div>
+</section>
+
+<section class="section" id="p11">
+<h2>11 · <code>npx</code> / CLI reference</h2>
+<p>The CLI exposes 5 commands via commander. Both bins (<code>tempest</code>, <code>t3mp3st</code>) map to
+<code>dist/cli.js</code>; version string <code>1.0.0</code>. <span class="src">src/cli.ts · package.json (bin)</span></p>
+<table>
+<tr><th>Command</th><th>Purpose (verified)</th></tr>
+<tr><td><code>t3mp3st interactive</code> <span class="tag t-default">DEFAULT</span></td><td>Interactive mission session (runs if no subcommand given)</td></tr>
+<tr><td><code>t3mp3st setup</code></td><td>Configuration wizard (provider keys, defaults) → stores in <code>~/.t3mp3st/</code></td></tr>
+<tr><td><code>t3mp3st status</code></td><td>Prints provider, model, API-key-configured flag, and config path</td></tr>
+<tr><td><code>t3mp3st test</code></td><td>Tests LLM connectivity via <code>new LLMBackbone(config.getLLMConfig())</code></td></tr>
+<tr><td><code>t3mp3st models</code></td><td>Lists <code>AVAILABLE_MODELS[provider]</code> for the configured provider</td></tr>
+</table>
+<div class="box warn"><div class="box-title">Verify publication before assuming <code>npx t3mp3st</code> hits a registry</div>
+The repo declares the bins and package name, but this repository does <b>not</b> prove it is published to the public npm
+registry. Treat registry install as <span class="tag t-example">EXAMPLE</span> until confirmed with
+<code>npm view t3mp3st version</code>.</div>
+<div class="cmd-card"><div class="cmd-head"><span class="badge b-npm">STANDARD NPM</span> Local install from a clone (always works) <button class="copy-btn" onclick="copyCmd(this)">copy</button></div>
+<pre><code>npm ci
+npm run build
+npm link          # exposes `t3mp3st` / `tempest` on your PATH
+t3mp3st status</code></pre></div>
+<div class="cmd-card"><div class="cmd-head"><span class="badge b-project">PROJECT COMMAND</span> From source, no link <button class="copy-btn" onclick="copyCmd(this)">copy</button></div>
+<pre><code>npm run dev        # tsx src/cli.ts → interactive session
+npx . status       # run the local package's bin (after build)</code></pre></div>
+<div class="cmd-card"><div class="cmd-head"><span class="badge b-npm">STANDARD NPM</span> From the registry — only if published <button class="copy-btn" onclick="copyCmd(this)">copy</button></div>
+<pre><code>npm view t3mp3st version    # errors ⇒ not published under that name
+npx t3mp3st setup           # EXAMPLE — only valid once published</code></pre></div>
+</section>
+
+<section class="section" id="p12">
+<h2>12 · Building (<code>tsc</code> → <code>./dist</code>)</h2>
+<div class="cmd-card"><div class="cmd-head"><span class="badge b-npm">STANDARD NPM</span> Build then run <button class="copy-btn" onclick="copyCmd(this)">copy</button></div>
+<pre><code>npm run build          # tsc → ./dist  (target ES2022, module ESNext)
+npm run server:prod    # node dist/server.js</code></pre></div>
+<p class="src">package.json (build/server:prod) · tsconfig.json (outDir ./dist, rootDir ./src)</p>
+<div class="box info"><div class="box-title">Fastest correctness gate</div>
+<code>npm run typecheck</code> (<code>tsc --noEmit</code>) type-checks without writing <code>dist/</code> — ideal for CI
+or a pre-commit hook.</div>
+<details><summary>Common build errors</summary>
+<table>
+<tr><th>Error</th><th>Cause</th><th>Fix</th></tr>
+<tr><td><code>Cannot find module … dist/…</code></td><td>Ran <code>server:prod</code>/<code>start</code> before building</td><td><code>npm run build</code> first</td></tr>
+<tr><td>TS engine errors</td><td>Node &lt; 22.19.0</td><td>Upgrade Node (Part 2)</td></tr>
+<tr><td><code>ERR_MODULE_NOT_FOUND</code> at runtime</td><td>This is an ESM project (<code>"type":"module"</code>)</td><td>Use <code>node dist/*.js</code>, not <code>require()</code></td></tr>
+</table></details>
+</section>
+
+<section class="section" id="p13">
+<h2>13 · Development mode (no build)</h2>
+<p>The dev path runs TypeScript directly through <code>tsx</code> — no compile step, faster iteration. This is the
+recommended way to explore.</p>
+<div class="cmd-card"><div class="cmd-head"><span class="badge b-npm">STANDARD NPM</span><button class="copy-btn" onclick="copyCmd(this)">copy</button></div>
+<pre><code>npm run server     # tsx src/server.ts  — HTTP server from source
+npm run dev        # tsx src/cli.ts     — CLI from source</code></pre></div>
+<div class="box info"><div class="box-title">There is no watch/auto-reload</div>
+<code>tsx</code> runs the file once; it does not watch for changes here. Restart after edits.
+There is also <b>no</b> <code>DEBUG</code>/<code>NODE_ENV</code> switch consumed by the app (verified — <code>NODE_ENV</code>
+is not read in <code>src/</code>); "debugging" means reading the dev server's console output. <span class="src">grep: NODE_ENV absent in src/</span></div>
+</section>
+
+<section class="section" id="p14">
+<h2>14 · Running the server</h2>
+<table>
+<tr><th>Goal</th><th>Command</th><th>Path</th></tr>
+<tr><td>Dev (run TS)</td><td><code>npm run server</code></td><td><code>tsx src/server.ts</code></td></tr>
+<tr><td>Production (built)</td><td><code>npm run server:prod</code></td><td><code>node dist/server.js</code> (build first)</td></tr>
+<tr><td>MCP</td><td><code>npm run mcp</code></td><td><code>tsx src/mcp-server.ts</code></td></tr>
+</table>
+<div class="cmd-card"><div class="cmd-head"><span class="badge b-npm">STANDARD NPM</span> Start &amp; open the War Room <button class="copy-btn" onclick="copyCmd(this)">copy</button></div>
+<pre><code>npm run server
+# then open:
+#   http://127.0.0.1:3333/ui           (War Room UI)
+#   http://127.0.0.1:3333/api/health   (health JSON)</code></pre></div>
+<p class="src">src/server.ts:143 (PORT), 152 (HOST), 7950-7952 (/ui)</p>
+</section>
+
+<section class="section" id="p15">
+<h2>15 · Startup checklist</h2>
+<div class="box info"><div class="box-title">Boot sequence (verified)</div>
+State load → proxy init → LLM init → grammar load → <code>app.listen(PORT, HOST)</code>.
+<code>unhandledRejection</code>/<code>uncaughtException</code> are logged but do <b>not</b> exit the process.
+<span class="src">src/server.ts:7969-8019</span></div>
+<ol class="kv">
+<li><b>Node ≥ 22.19.0</b> — <code>node -v</code>. <span class="src">package.json (engines)</span></li>
+<li><b>Deps installed</b> — <code>npm ci</code> ran cleanly.</li>
+<li><b>An LLM path exists</b> — a provider key set/stored, OR a local agent connected, OR a local model endpoint. Check with <code>t3mp3st status</code> or <code>GET /api/llm/status</code>.</li>
+<li><b>Persistence decided</b> — <code>T3MP3ST_STATE_DIR</code> set if you need missions to survive restart (Part 6).</li>
+<li><b>Bind address intended</b> — default loopback unless you deliberately expose it (Part 7).</li>
+</ol>
+</section>
+
+<section class="section" id="p16">
+<h2>16 · Verify it's running</h2>
+<div class="cmd-card"><div class="cmd-head"><span class="badge b-linux">STANDARD LINUX</span> Health summary <button class="copy-btn" onclick="copyCmd(this)">copy</button></div>
+<pre><code>curl -sS http://127.0.0.1:3333/api/health | jq '{version, apiVersion, mode, storage: .storage.driver, path: .storage.path, llm: .llm.configured}'</code></pre></div>
+<table>
+<tr><th>Field</th><th>Meaning</th></tr>
+<tr><td><code>storage.driver</code></td><td><code>memory</code> (ephemeral) vs <code>filesystem</code> (persisted)</td></tr>
+<tr><td><code>storage.path</code> / <code>stateFile</code> / <code>eventsFile</code></td><td>Where state is written when persisted</td></tr>
+<tr><td><code>llm.configured</code> / <code>connected</code> / <code>provider</code> / <code>model</code></td><td>LLM readiness</td></tr>
+<tr><td><code>mode</code></td><td>Runtime mode label</td></tr>
+</table>
+<p class="src">src/server.ts:4399-4426 (healthPayload) · route 4862 (GET /health &amp; /api/health)</p>
+<div class="box warn"><div class="box-title">Version conflict to expect</div>
+Health reports <code>version:"0.2.1"</code> / <code>apiVersion:"v1"</code>; <code>package.json</code> and the CLI say
+<code>1.0.0</code>. Known inconsistency — see Part 60. <span class="src">src/server.ts:4399-4426 vs package.json</span></div>
+</section>
+
+<section class="section" id="p17">
+<h2>17 · Stopping</h2>
+<p><kbd>Ctrl-C</kbd> sends SIGINT. The handler calls <code>flushPersist()</code> then <code>process.exit(0)</code>.
+It does <b>not</b> call <code>server.close()</code>, so in-flight HTTP requests may be cut mid-response — a graceful-drain
+gap, not a data-loss risk (state is flushed first). <span class="src">src/server.ts:8009-8017</span></p>
+<div class="box info"><div class="box-title">State is flushed on the way out</div>
+If <code>T3MP3ST_STATE_DIR</code> is set, the shutdown flush writes the latest <code>state.json</code>. If it's unset,
+there's nothing to flush — everything was in memory and is gone. <span class="src">src/server.ts (flushPersist)</span></div>
+</section>
+
+<section class="section" id="p18">
+<h2>18 · Restarting</h2>
+<div class="flow">Stop (Ctrl-C → flushPersist)
+   │
+   ▼
+[state.json on disk]   (only if T3MP3ST_STATE_DIR was set)
+   │
+   ▼
+Start again  →  loadPersistedState() re-reads state.json + events.jsonl at boot
+   │
+   ▼
+Ledgers restored (missions/approvals/evidence/…)   —OR—   empty if driver was 'memory'</div>
+<p class="src">src/server.ts:1164-1187 (loadPersistedState)</p>
+<div class="box danger"><div class="box-title">Restart = data loss without persistence</div>
+Restarting a <code>memory</code>-driver server wipes every mission, approval, and piece of evidence. Set
+<code>T3MP3ST_STATE_DIR</code> <b>before</b> the engagement, not after. <span class="src">src/server.ts:926-929</span></div>
+</section>
+
+<section class="section" id="p19">
+<h2>19 · Pull latest from Git</h2>
+<p>The remote is <code>git@github.com:eddocg/T3MP3ST.git</code>; active branch <code>develop</code>, main branch
+<code>main</code>. Lockfile is <code>package-lock.json</code> (npm; no pnpm/yarn). <span class="src">git remote/branch</span></p>
+<div class="cmd-card"><div class="cmd-head"><span class="badge b-git">STANDARD GIT</span> Inspect before pulling <button class="copy-btn" onclick="copyCmd(this)">copy</button></div>
+<pre><code>git status               # working tree clean?
+git fetch --all --prune
+git log --oneline -5 origin/develop</code></pre></div>
+<div class="cmd-card"><div class="cmd-head"><span class="badge b-git">STANDARD GIT</span> Pull <button class="copy-btn" onclick="copyCmd(this)">copy</button></div>
+<pre><code>git pull --ff-only origin develop</code></pre></div>
+<div class="box warn"><div class="box-title">Stash or commit local changes first</div>
+<code>--ff-only</code> refuses to merge if your tree has diverged. If you have local edits: <code>git stash</code> →
+pull → <code>git stash pop</code>, or commit to your own branch. This manual does <b>not</b> modify source, so a clean
+tree is the expected state.</div>
+</section>
+
+<section class="section" id="p20">
+<h2>20 · Update + rebuild runbook</h2>
+<div class="box info"><div class="box-title">Order matters: deps → build → restart</div>
+Always reinstall dependencies before rebuilding — a pulled change may add or bump a dependency in
+<code>package-lock.json</code>.</div>
+<div class="cmd-card"><div class="cmd-head"><span class="badge b-npm">STANDARD NPM</span> Full update sequence <button class="copy-btn" onclick="copyCmd(this)">copy</button></div>
+<pre><code># 1. (optional but recommended) back up state — see Part 23
+cp -a "$T3MP3ST_STATE_DIR" "$T3MP3ST_STATE_DIR.bak.$(date +%Y%m%d)"
+
+# 2. pull
+git pull --ff-only origin develop
+
+# 3. reinstall exactly per lockfile
+npm ci
+
+# 4. rebuild (only needed for the built/prod path)
+npm run build
+
+# 5. sanity gates
+npm run typecheck
+npm test
+
+# 6. restart the server
+npm run server:prod        # or npm run server for dev</code></pre></div>
+<div class="box info"><div class="box-title">Dev path skips the build</div>
+If you run <code>npm run server</code> (tsx), you can skip step 4 — <code>tsx</code> executes the updated source directly.
+You still want <code>npm ci</code> (step 3) and the sanity gates.</div>
+</section>
+
+<section class="section" id="p22">
+<h2>22 · Rollback</h2>
+<div class="cmd-card"><div class="cmd-head"><span class="badge b-git">STANDARD GIT</span> Roll code back to a known-good commit <button class="copy-btn" onclick="copyCmd(this)">copy</button></div>
+<pre><code>git log --oneline -20               # find the last good SHA
+git checkout &lt;good-sha&gt;             # detached HEAD to inspect/run
+# or, to move the branch back (only if you own it and understand it):
+# git reset --hard &lt;good-sha&gt;</code></pre></div>
+<div class="box danger"><div class="box-title"><code>git reset --hard</code> discards local changes</div>
+It permanently drops uncommitted work and rewrites branch history. Prefer <code>git checkout &lt;sha&gt;</code> (detached)
+to test a rollback first, and only <code>reset --hard</code> a branch you own. <span class="badge b-git">STANDARD GIT</span></div>
+<div class="cmd-card"><div class="cmd-head"><span class="badge b-npm">STANDARD NPM</span> Rebuild after rollback <button class="copy-btn" onclick="copyCmd(this)">copy</button></div>
+<pre><code>npm ci          # match the lockfile at that commit
+npm run build
+npm run server:prod</code></pre></div>
+<div class="box info"><div class="box-title">State is independent of code</div>
+Rolling back code does not roll back <code>state.json</code>. If a bad version corrupted state, restore the state backup
+too (Part 23). There is <b>no</b> built-in state-migration or state-reset command — state is a plain JSON file you manage
+by hand. <span class="tag t-impl">IMPLEMENTED</span></div>
+</section>
+
+<section class="section" id="p23">
+<h2>23 · Backing up &amp; restoring state</h2>
+<div class="box danger"><div class="box-title">Stop the server first</div>
+State is written debounced (1 s after a change) and flushed on shutdown. Copying <code>state.json</code> while the server
+is writing can capture a torn file. <b>Stop the server, then copy.</b> <span class="src">src/server.ts:1127-1143</span></div>
+<div class="cmd-card"><div class="cmd-head"><span class="badge b-linux">STANDARD LINUX</span> Back up <button class="copy-btn" onclick="copyCmd(this)">copy</button></div>
+<pre><code># with the server stopped:
+tar czf t3mp3st-state-$(date +%Y%m%d-%H%M).tgz -C "$T3MP3ST_STATE_DIR" state.json events.jsonl</code></pre></div>
+<div class="cmd-card"><div class="cmd-head"><span class="badge b-linux">STANDARD LINUX</span> Restore <button class="copy-btn" onclick="copyCmd(this)">copy</button></div>
+<pre><code># with the server stopped:
+tar xzf t3mp3st-state-YYYYMMDD-HHMM.tgz -C "$T3MP3ST_STATE_DIR"
+# then start; loadPersistedState() reads it at boot
+npm run server:prod</code></pre></div>
+<table>
+<tr><th>File</th><th>Contents</th></tr>
+<tr><td><code>state.json</code></td><td>Snapshot of all 11 ledgers (missions, approvals, evidence, findings, hypotheses, work orders, …)</td></tr>
+<tr><td><code>events.jsonl</code></td><td>Append-only event log</td></tr>
+</table>
+<p class="src">src/server.ts:931-939, 1164-1187</p>
+<div class="box info"><div class="box-title">Reports &amp; evidence artifacts are separate</div>
+In Docker, <code>./reports</code> and <code>./evidence</code> are bind-mounted and persist independently of
+<code>state.json</code>. Back those up too if your evidence pipeline writes files there. <span class="src">docker-compose.yml (volumes)</span></div>
+</section>
+
+<section class="section" id="p24">
+<h2>24 · UI guide — the War Room</h2>
+<p>The UI is a single hand-authored vanilla-JS file (<code>docs/index.html</code>, ~1.6 MB, no framework/build) served at
+<code>/ui</code> (root <code>/</code> redirects there). Nav items map 1:1 to <code>#page-*</code> divs; the API client is
+<code>T3MP3ST_API</code>. <span class="src">docs/index.html; src/server.ts:7950-7952</span></p>
+<div class="box danger"><div class="box-title">The #1 naming trap (again, because it matters)</div>
+The <b>"⭐ Op Admiral"</b> nav page drives the <b>Op General</b> (<code>/api/general/*</code>). The actual <b>Admiral</b>
+intake is the <b>"⚓ Guided"</b> wizard. <span class="src">docs/index.html nav vs src/general vs src/admiral</span></div>
+<h3>Page map (verified)</h3>
+<table>
+<tr><th>Nav item</th><th>Page id</th><th>What it does</th></tr>
+<tr><td>War Room <span class="tag t-default">DEFAULT</span></td><td><code>page-warroom</code></td><td>Hero controls (ENGAGE / 🎯 HUNT / ⚓ Guided), Mission Spine (work-order board + gate snapshot), Findings, plus the "Pliny" power-user toolbar exposing most backend calls</td></tr>
+<tr><td>Live Scan</td><td><code>page-live-scan</code></td><td>Live scan view</td></tr>
+<tr><td>🧾 Scope Receipts</td><td><code>page-receipts</code></td><td>Approve/reject pending approval receipts (badge = pending count)</td></tr>
+<tr><td>Operatives</td><td><code>page-operators</code></td><td>⚠️ "Deploy"/"spawn" is <b>client-only state</b> — real operators spawn inside <code>/api/mission/start</code></td></tr>
+<tr><td>Evidence Vault</td><td><code>page-evidence</code></td><td>Evidence entries</td></tr>
+<tr><td>⭐ Op Admiral</td><td><code>page-general</code></td><td>The <b>Op General</b> control page: PLAN / EXECUTE / FULL AUTO / SITREP / assessment</td></tr>
+<tr><td>Arsenal</td><td><code>page-arsenal</code></td><td>⚠️ Renders a <b>hardcoded ~85-item array</b>, not the live <code>/api/arsenal/catalog</code> — can drift</td></tr>
+<tr><td>Terminal / Config Library / Benchmarks / CTF Range / Self-Improvement / Settings / About</td><td>various</td><td>Supporting pages</td></tr>
+</table>
+<p class="src">docs/index.html nav map (Confirmed in operator guide §6)</p>
+<div class="box info"><div class="box-title">Missing nav items are intentional</div>
+There is no separate "Mission Control", "Findings", "Work Orders", or "Approvals" nav item — Mission Control merged into
+War Room, Findings/Work Orders live inside War Room, and "Approvals" is the Scope Receipts page.
+<span class="src">docs/index.html:4471 comment</span></div>
+<h3>Guided happy path (canonical)</h3>
+<div class="flow">War Room ──► "⚓ Guided" (Admiral intake wizard, 4 steps)
+        ──► preview plan  (confirmed:false dry-run = Gate #1)
+        ──► "Launch Hunt" (confirmed:true)
+              │  external + non-autonomous ⇒ redirected to Scope Receipts
+              ▼
+🧾 Scope Receipts ──► Approve pending row  (clears the 403)
+        ──► mission executes (tick loop)
+        ──► watch Findings · Work-Order Board · Evidence Vault</div>
+<p class="src">docs/index.html:26801/26854/26860; src/index.ts tick loop</p>
+</section>
+
+<section class="section" id="p26">
+<h2>26 · When to use the API directly</h2>
+<table>
+<tr><th>Use the API when…</th><th>Because</th></tr>
+<tr><td>You need a route with <b>no UI</b></td><td>e.g. <code>/api/bounty/*</code>, <code>/api/approvals/authorize-target</code>, <code>/api/operators/spawn</code> have no War Room caller <span class="src">API ref §13, §6, §9</span></td></tr>
+<tr><td>You want the <b>backend truth</b></td><td>e.g. <code>/api/arsenal/catalog</code> vs the UI's hardcoded list</td></tr>
+<tr><td>You're scripting / automating</td><td>CI, batch missions, custom dashboards</td></tr>
+<tr><td>You're debugging a gate</td><td><code>/api/health</code>, <code>/api/llm/status</code>, <code>/api/mission-gate</code>, <code>/api/approvals</code></td></tr>
+</table>
+<div class="box warn"><div class="box-title">Same safety model as the UI</div>
+The API has <b>no authentication</b>; it relies on loopback binding. Every gate (409 plan-hold, 403 approval, scope,
+tool-tier) fires on API calls exactly as it does for the UI. You cannot script around them via HTTP.
+<span class="src">API ref — Enforcement summary</span></div>
+</section>
+
+<section class="section" id="p27">
+<h2>27 · API basics</h2>
+<table>
+<tr><th>Property</th><th>Value</th></tr>
+<tr><td>Base URL</td><td><code>http://127.0.0.1:3333</code> (configurable via <code>T3MP3ST_HOST</code>/<code>T3MP3ST_PORT</code>)</td></tr>
+<tr><td>Format</td><td>JSON in, JSON out</td></tr>
+<tr><td>Auth</td><td><b>None</b> — loopback-only safety model</td></tr>
+<tr><td>Route count</td><td>~129 handlers under <code>/api/*</code></td></tr>
+<tr><td>Key status codes</td><td><code>403</code> = needs approval (pending receipt created) · <code>409</code> = plan-quality gate held</td></tr>
+</table>
+<div class="cmd-card"><div class="cmd-head"><span class="badge b-api">API CALL</span> GET example <button class="copy-btn" onclick="copyCmd(this)">copy</button></div>
+<pre><code>curl -sS http://127.0.0.1:3333/api/health | jq .</code></pre></div>
+<div class="cmd-card"><div class="cmd-head"><span class="badge b-api">API CALL</span> POST example <button class="copy-btn" onclick="copyCmd(this)">copy</button></div>
+<pre><code>curl -sS -X POST http://127.0.0.1:3333/api/general/plan \
+  -H 'Content-Type: application/json' \
+  -d '{"objective":"Test api.example.com for access-control flaws","scope":["api.example.com"]}' | jq .</code></pre></div>
+<p class="src">src/server.ts (route table); values verified in API ref</p>
+</section>
+
+<section class="section" id="p28">
+<h2>28 · API reference (grouped)</h2>
+<p>~129 as-built routes. "UI-wired" = called by the War Room; "backend-only" = registered but no UI caller found. Full
+per-route detail lives in <code>T3MP3ST_API_REFERENCE.md</code>; this is the operator-facing subset.</p>
+
+<details open><summary>Health &amp; system</summary>
+<table>
+<tr><th>Method</th><th>Route</th><th>Notes</th></tr>
+<tr><td>GET</td><td><code>/health</code>, <code>/api/health</code></td><td>Health payload (ok/status/llm/storage). <span class="src">:4862</span></td></tr>
+<tr><td>GET</td><td><code>/api/preflight</code></td><td>Preflight checks. <span class="src">:4870</span></td></tr>
+<tr><td>GET</td><td><code>/api/llm/status</code></td><td>LLM connectivity</td></tr>
+<tr><td>GET/POST</td><td><code>/api/net/ip</code>, <code>/api/net/proxy</code></td><td>Network/proxy status &amp; config</td></tr>
+<tr><td>GET</td><td><code>/</code></td><td>Redirect → <code>/ui/</code>; static UI from <code>docs/</code>. <span class="src">:7950-7952</span></td></tr>
+</table></details>
+
+<details><summary>Admiral (intake) &amp; Op General (planner)</summary>
+<table>
+<tr><th>Method</th><th>Route</th><th>Notes</th></tr>
+<tr><td>POST</td><td><code>/api/admiral/converse</code>, <code>/suggest</code></td><td>Conversational intake &amp; suggestions</td></tr>
+<tr><td>POST</td><td><code>/api/admiral/launch</code></td><td><code>confirmed:false</code>=dry-run (Gate #1); <code>confirmed:true</code>=launch. 403 if unapproved, 409 if plan held</td></tr>
+<tr><td>GET/POST</td><td><code>/api/general/plan</code></td><td>Build <code>OpPlan</code> (UI "PLAN OPERATION"). ⚠️ WHITEPAPER mislabels this "Op Admiral"</td></tr>
+<tr><td>POST</td><td><code>/api/general/execute</code></td><td><b>409</b> if <code>reviewPlan</code>=hold; guards <code>mission_execution</code>. <span class="src">:7219-7225</span></td></tr>
+<tr><td>POST</td><td><code>/api/general/auto</code></td><td>One-shot plan+execute ("FULL AUTO"); guards <code>mission_execution</code>. <span class="src">:7373</span></td></tr>
+</table></details>
+
+<details><summary>Missions</summary>
+<table>
+<tr><th>Method</th><th>Route</th><th>Notes</th></tr>
+<tr><td>POST</td><td><code>/api/mission/start</code></td><td>Guards <code>mission_execution</code> → 403 + pending receipt if unapproved. <span class="src">:6311</span></td></tr>
+<tr><td>POST</td><td><code>/api/mission/stop|pause|resume</code></td><td>Mission controls (UI-wired)</td></tr>
+<tr><td>GET</td><td><code>/api/mission/status</code>, <code>/findings</code>, <code>/report</code></td><td>Status, findings, reports</td></tr>
+<tr><td>POST</td><td><code>/api/mission-gate</code></td><td>Ledger-based advisory gate (10 checks) — distinct from the plan-quality gate</td></tr>
+</table>
+<div class="box info">There is <b>no</b> <code>/api/missions</code> (plural) route — it's listed as planned/not-built. <span class="src">FEATURES.md:628-629</span></div>
+</details>
+
+<details><summary>Research ledger, arsenal, operators</summary>
+<table>
+<tr><th>Method</th><th>Route</th><th>Notes</th></tr>
+<tr><td>GET/POST/PATCH</td><td><code>/api/hypotheses</code>, <code>/work-orders</code>, <code>/evidence</code>, <code>/findings</code>, <code>/retests</code></td><td>Research-ledger CRUD; findings gated by <code>gateLiveFinding()</code></td></tr>
+<tr><td>GET</td><td><code>/api/arsenal/catalog</code></td><td>Live tool catalog (⚠️ UI doesn't call this)</td></tr>
+<tr><td>GET/POST</td><td><code>/api/tools</code>, <code>/api/tools/execute</code></td><td>Tool inventory &amp; execution</td></tr>
+<tr><td>POST</td><td><code>/api/operators/spawn</code>, <code>/:id/task</code></td><td>⚠️ No UI caller — real spawn is inside <code>/api/mission/start</code></td></tr>
+</table></details>
+
+<details><summary>Local agents · bug bounty · advanced</summary>
+<table>
+<tr><th>Method</th><th>Route</th><th>Notes</th></tr>
+<tr><td>GET/POST</td><td><code>/api/agents/local/detect|status|connect|disconnect|dispatch|ping</code></td><td>Claude Code / Codex / Hermes / OpenCode / Oh My Pi</td></tr>
+<tr><td>GET/POST</td><td><code>/api/bounty/platforms|programs|credentials|format|submit</code></td><td>⚠️ <b>Backend-only, no UI</b></td></tr>
+<tr><td>POST</td><td><code>/api/whitebox/analyze</code>, <code>/api/attack-graph</code>, <code>/api/pressure-paths/*</code></td><td>Decomposition, attack graph, adversarial pressure paths</td></tr>
+<tr><td>POST</td><td><code>/api/self-heal/run</code>, <code>/api/watch-loop/run</code>, <code>/api/learning/run-review</code></td><td>Watch / self-heal / learning subsystems</td></tr>
+</table></details>
+</section>
+
+<section class="section" id="p30">
+<h2>30 · Approval API</h2>
+<table>
+<tr><th>Method</th><th>Route</th><th>Notes</th></tr>
+<tr><td>GET</td><td><code>/api/approvals</code></td><td>List receipts; lazily flips expired ones on read. <span class="src">:4983-4986</span></td></tr>
+<tr><td>POST</td><td><code>/api/approvals/request</code></td><td>Create pending receipt; rejects wildcard targets for active actions. <span class="src">:4995</span></td></tr>
+<tr><td>POST</td><td><code>/api/approvals/:id/approve</code></td><td>Approve (TTL default 30 min). ⚠️ <b>No status precondition</b> — can re-approve rejected/expired. <span class="src">:5027-5042</span></td></tr>
+<tr><td>POST</td><td><code>/api/approvals/:id/reject</code></td><td>Reject. <span class="src">:5106</span></td></tr>
+<tr><td>POST</td><td><code>/api/approvals/authorize-target</code></td><td>Pre-authorize a concrete target; stricter (409 if any referenced receipt is non-pending). ⚠️ No UI caller. <span class="src">:5044-5104</span></td></tr>
+</table>
+<p class="src">src/server.ts:4983-5116</p>
+<div class="box info"><div class="box-title">GuardAction types</div>
+<code>command_execution</code>, <code>network_request</code>, <code>mission_execution</code>, <code>autonomous_execution</code>,
+<code>model_call</code>. ⚠️ <code>model_call</code> has <b>no enforcement call site</b> — it is inert. <span class="src">src/server.ts:571</span></div>
+<div class="cmd-card"><div class="cmd-head"><span class="badge b-api">API CALL</span> Approve a pending receipt <button class="copy-btn" onclick="copyCmd(this)">copy</button></div>
+<pre><code># list pending
+curl -sS 'http://127.0.0.1:3333/api/approvals?status=pending' | jq '.[] | {id, action, target, status}'
+# approve one by id
+curl -sS -X POST http://127.0.0.1:3333/api/approvals/&lt;id&gt;/approve -H 'Content-Type: application/json' -d '{"ttlMinutes":30}'</code></pre></div>
+<div class="box warn"><div class="box-title">Target matching is exact-host</div>
+A receipt's <code>target</code> is a host/URL; <code>approvalMatches</code> compares normalized targets. Approving
+<code>example.com</code> does <b>not</b> authorize <code>api.example.com</code>. <span class="src">src/server.ts:1238-1249</span></div>
+</section>
+
+<section class="section" id="p32">
+<h2>32 · UI vs API vs CLI — which to use</h2>
+<table>
+<tr><th>Task</th><th>Best interface</th><th>Why</th></tr>
+<tr><td>Run a guided mission</td><td><b>UI</b> (War Room → ⚓ Guided)</td><td>Wizard + gate chips + one-click approve</td></tr>
+<tr><td>Approve/reject</td><td><b>UI</b> Scope Receipts, or <b>API</b> <code>/api/approvals/*</code></td><td>UI for interactive; API for scripting</td></tr>
+<tr><td>Configure keys / check status</td><td><b>CLI</b> (<code>t3mp3st setup</code>/<code>status</code>)</td><td>No server needed</td></tr>
+<tr><td>Bug-bounty submit / format</td><td><b>API</b> <code>/api/bounty/*</code></td><td>No UI exists</td></tr>
+<tr><td>Backend truth (real tool catalog, target authorize)</td><td><b>API</b></td><td>UI list is hardcoded; <code>authorize-target</code> has no UI</td></tr>
+<tr><td>Automation / CI</td><td><b>API</b></td><td>Scriptable JSON</td></tr>
+</table>
+<div class="flow">        ┌──────────────┐
+        │  Same engine │  TempestCommand
+        └──────┬───────┘
+     ┌─────────┼──────────┐
+     ▼         ▼          ▼
+  CLI       HTTP API    MCP server
+(config,  (UI + scripts, (agent
+ sessions) all gates)    integration)</div>
+<p class="src">src/cli.ts · src/server.ts · src/mcp-server.ts (three entrypoints, one engine)</p>
+</section>
+
+<section class="section" id="p33">
+<h2>33 · Core mental model</h2>
+<p>One engine (<code>TempestCommand</code>), a naval-command metaphor, evidence discipline. The flow of authority:</p>
+<div class="flow">Admiral (intake, plan-only)       src/admiral
+   │  briefToDirective()
+   ▼
+Op General (planner/orchestrator) src/general   ── builds OpPlan (hunt lanes, work orders, RoE)
+   │
+   ▼
+TempestCommand (tick loop)        src/index.ts  ── drives the mission
+   │
+   ▼
+OperatorAgent  ──►  Arsenal.execute()  ──►  scope gate ──► tool-tier gate ──► tool</div>
+<table>
+<tr><th>Concept</th><th>What it is</th><th>Source</th></tr>
+<tr><td>Admiral</td><td>Chat-intake wizard; produces a <code>MissionBrief</code>/directive. Plan-only, never executes</td><td><span class="src">src/admiral/index.ts</span></td></tr>
+<tr><td>Op General</td><td>Planner/orchestrator; produces the <code>OpPlan</code> and reviews it</td><td><span class="src">src/general/index.ts</span></td></tr>
+<tr><td>Receipt</td><td>An <code>ApprovalRequest</code> for a specific <code>action:target</code> ("Scope Receipt" in the UI)</td><td><span class="src">src/server.ts:1200-1333</span></td></tr>
+<tr><td>Research ledger</td><td>Hypotheses → evidence → findings → retests. Only tool-proven evidence promotes a finding</td><td><span class="src">src/server.ts:566-836; src/evidence/gate.ts</span></td></tr>
+</table>
+<div class="box info"><div class="box-title">Evidence discipline</div>
+"Prose is not evidence." <code>gateLiveFinding()</code> enforces that a finding needs tool-proven evidence before it can
+be promoted. <span class="src">src/evidence/gate.ts</span></div>
+</section>
+
+<section class="section" id="p34">
+<h2>34 · Admiral &amp; "Op Admiral" (the naming collision)</h2>
+<div class="box danger"><div class="box-title">Read this once, remember it forever</div>
+<table>
+<tr><th>Name</th><th>What it actually is</th><th>Routes</th></tr>
+<tr><td>Admiral <b>module</b></td><td>Intake wizard. UI button: <b>"⚓ Guided"</b></td><td><code>/api/admiral/*</code></td></tr>
+<tr><td>"⭐ Op Admiral" <b>UI page</b></td><td>The <b>Op General</b> control page (misnamed in the UI)</td><td><code>/api/general/*</code></td></tr>
+</table>
+The <b>"⭐ Op Admiral" page calls <code>/api/general/*</code></b>, not <code>/api/admiral/*</code>.
+<span class="src">docs/index.html nav; src/general/index.ts; src/admiral/index.ts</span></div>
+<p><code>WHITEPAPER.md:552</code> repeats the mistake, mislabeling <code>/api/general/plan</code> as "Op Admiral".
+The API reference (correctly) attributes it to General. <span class="src">Docs vs implementation — see Part 60</span></p>
+</section>
+
+<section class="section" id="p35">
+<h2>35 · The Mission Gate(s) — five checkpoints</h2>
+<div class="box warn"><div class="box-title">Two gate systems + two approval systems share vocabulary</div>
+This is the biggest source of "why am I blocked?" confusion. There are effectively <b>five</b> checkpoints; all must pass.
+<span class="src">approval-flow §1 (Confirmed)</span></div>
+<div class="flow">GATE #1  Admiral confirmed:true      /api/admiral/launch dry-run vs real   (preview sends false)
+GATE #2  Plan-quality reviewPlan     status hold ⇒ HTTP 409                (src/general:1097-1220)
+GATE #3  Server approval             guardAction(mission_execution) ⇒ 403 + pending receipt
+GATE #4  Scope gate                  scopeViolation() ⇒ SCOPE DENIED       (cannot be approved around)
+GATE #5  Tool-tier approval          ApprovalController.gate() ⇒ approve/deny (fail-safe deny)</div>
+<table>
+<tr><th>Gate</th><th>Signal</th><th>How to clear it</th></tr>
+<tr><td>#1 Admiral confirm</td><td>plan only previews</td><td>Click "⚓ Launch Hunt" (sends <code>confirmed:true</code>)</td></tr>
+<tr><td>#2 Plan quality</td><td>HTTP <b>409</b> / gate chip = HOLD</td><td>Bind scope; give every hunt lane its prove/disprove work orders; don't request destructive actions; re-plan</td></tr>
+<tr><td>#3 Server approval</td><td>HTTP <b>403</b> + pending receipt</td><td>Approve on Scope Receipts (exact host)</td></tr>
+<tr><td>#4 Scope</td><td><code>SCOPE DENIED</code></td><td>Add the target to the mission — <b>cannot</b> be approved around</td></tr>
+<tr><td>#5 Tool tier</td><td><code>APPROVAL REQUIRED</code>/denied</td><td>Interactive approver, or <code>T3MP3ST_APPROVED_TOOLS</code> (expert-only)</td></tr>
+</table>
+<div class="box info"><div class="box-title">Hard blockers for the plan-quality gate (#2)</div>
+Empty scope (<code>!roe.scope.length</code>) and <code>destructiveAllowed===true</code> (−30) each force a hold.
+Warnings like "hunt lane without work orders" (−12) degrade the score but don't block. Status thresholds:
+hold&lt;70, degraded&lt;90, ready. <span class="src">src/general/index.ts:1115-1189</span></div>
+<div class="box info"><div class="box-title">Also: the advisory ledger gate</div>
+<code>POST /api/mission-gate</code> (<code>buildMissionGate</code>) is a <b>separate, advisory</b> 10-check gate over the
+ledger; <code>score = round(okCount/10*100)</code>. It does <b>not</b> block execution — don't confuse it with Gate #2.
+<span class="src">src/server.ts:1575-1733</span></div>
+</section>
+
+<section class="section" id="p37">
+<h2>37 · OPSEC reference <span class="tag t-doc">DOCUMENTED</span> vs <span class="tag t-impl">IMPLEMENTED</span></h2>
+<div class="box danger"><div class="box-title">OPSEC is largely advisory — do not rely on it for stealth</div>
+Selecting <code>silent</code>/<code>covert</code>/<code>loud</code> changes the <b>prompt guidance to the LLM</b> but does
+<b>not</b> change runtime scanning behavior, pacing, or add real evasion. <span class="src">src/opsec/index.ts:55-240 (Confirmed)</span></div>
+<table>
+<tr><th>OPSEC feature</th><th>Status</th><th>Reality</th></tr>
+<tr><td>Auto-pause on detection</td><td><span class="tag t-impl">IMPLEMENTED but inert</span></td><td>Fires when <code>detectionEvents.length &gt;= maxDetectionEvents</code>, but <code>recordDetection()</code> has <b>no production caller</b>, so the counter never increments from real telemetry. <span class="src">src/index.ts:932-935</span></td></tr>
+<tr><td>Jitter / traffic blending / log sanitization / cleanup</td><td><b style="color:var(--danger)">NOT CURRENTLY IMPLEMENTED (no callers)</b></td><td><code>getJitteredDelay()</code>, <code>trafficBlending</code>, <code>avoidDetection</code>, <code>loggingSanitization</code>, <code>cleanupOnComplete</code> have no callers — definitions only. <span class="src">src/opsec/index.ts</span></td></tr>
+<tr><td>OPSEC vocabulary</td><td><span class="tag t-impl">MISMATCH</span></td><td>Mission drafts use <code>overt|normal|covert|ghost</code>; the engine uses <code>silent|covert|loud</code>. Only <code>covert</code> is shared, and it means different things. <span class="src">src/server.ts:1388; src/types/index.ts:357</span></td></tr>
+</table>
+<div class="box warn"><div class="box-title">If you need real stealth</div>
+It isn't here today. Treat OPSEC settings as documentation of intent, not enforcement. Plan engagements assuming your
+traffic is fully visible to the target. <span class="badge b-optional">OPERATOR PRACTICE</span></div>
+</section>
+
+<section class="section" id="p39">
+<h2>39 · Work orders &amp; hunt lanes</h2>
+<p>An <code>OpPlan</code> declares <b>hunt lanes</b> (by mission family) and <b>work orders</b>. The planner synthesizes
+one <code>prove</code> + one <code>disprove</code> work order per lane. <span class="src">src/general/index.ts:82,94,101-110,927-961</span></p>
+<table>
+<tr><th>Concept</th><th>Detail</th></tr>
+<tr><td>Hunt lane</td><td>A line of inquiry keyed to a <code>MissionFamily</code> (web_api, ai_red_team, cloud_infra, smart_contract, code_supply_chain, crypto_secrets, reverse_binary, agent_warfare, social_osint, reporting_remediation)</td></tr>
+<tr><td>Work order status</td><td><code>queued | ready | needs_receipt | running | completed | blocked</code></td></tr>
+<tr><td>Gate coupling</td><td>A hunt lane with no matching work order triggers the "-12" plan-quality warning (Gate #2)</td></tr>
+</table>
+<p class="src">src/general/index.ts; src/resources/index.ts:1-10</p>
+<div class="box info"><div class="box-title">Two origins for work orders</div>
+Work orders come from (a) hypothesis decomposition (<code>/api/hypotheses/:id/decompose</code>) and (b) the General's plan
+(two per lane) — the latter is code-only and undocumented in prose. <span class="src">src/general/index.ts:94</span></div>
+</section>
+
+<section class="section" id="p40">
+<h2>40 · Agents &amp; the arsenal (what actually runs)</h2>
+<table>
+<tr><th>Layer</th><th>Reality</th></tr>
+<tr><td>Built-in tools</td><td>Pure-Node probes in <code>BUILTIN_TOOLS</code>. Ungated by default; <code>T3MP3ST_GATE_BUILTINS=1</code> routes the intrusive ones through approval. <span class="src">src/arsenal/index.ts</span></td></tr>
+<tr><td>Specialist arsenal</td><td>76 catalog entries wrapping external binaries — <b>only armed under <code>T3MP3ST_FULL_ARSENAL=1</code></b>, and only work if the binary is installed. <span class="src">src/index.ts:423; src/arsenal/catalog.ts</span></td></tr>
+<tr><td>Structured parsers</td><td>Only nuclei, httpx, dalfox, ffuf, katana, semgrep, gitleaks, trivy, grype, garak populate structured findings. Others (<code>parserStatus:'planned'</code>) return raw stdout. <span class="src">src/arsenal/parsers.ts</span></td></tr>
+<tr><td>Arg templates</td><td>Many catalog tools lack a bespoke <code>ARG_TEMPLATE</code> and fall back to a bare positional arg — wrong for subcommand tools (aws/az/gcloud, ghidra, gdb, …). <span class="src">src/arsenal/catalog.ts + adapter-tools.ts</span></td></tr>
+<tr><td>Local coding agents</td><td>Claude Code / Codex / Hermes / OpenCode / Oh My Pi via <code>/api/agents/local/*</code>. <span class="src">src/agent/local-agents.ts</span></td></tr>
+</table>
+<div class="box warn"><div class="box-title">Whether a specialist tool works depends on three things</div>
+(a) <code>T3MP3ST_FULL_ARSENAL=1</code>, (b) the binary being installed (absent binaries degrade gracefully via
+<code>isToolAvailable</code>), and (c) whether it has a bespoke arg template + parser. <span class="src">src/arsenal/index.ts:3253-3260</span></div>
+</section>
+
+<section class="section" id="p41">
+<h2>41 · Receipts &amp; evidence lifecycle</h2>
+<h3>Receipt (approval) lifecycle</h3>
+<div class="flow">request  ──►  PENDING  ──approve──►  APPROVED  ──(TTL 30 min)──►  EXPIRED
+                 │                                   ▲
+                 └──reject──►  REJECTED  ─(weak path re-approve, see note)─┘</div>
+<table>
+<tr><th>Fact</th><th>Value</th><th>Source</th></tr>
+<tr><td>Default TTL</td><td>30 minutes (<code>Number(body.ttlMinutes||30)</code>)</td><td><span class="src">:5035</span></td></tr>
+<tr><td>Target</td><td>A host/URL, not a mission id; matched normalized &amp; exact-host</td><td><span class="src">:1238-1249</span></td></tr>
+<tr><td>Expiry</td><td>Lazy — flipped to EXPIRED on read of <code>GET /api/approvals</code></td><td><span class="src">:4986</span></td></tr>
+<tr><td>Persistence</td><td>Server-tier receipts persist if <code>T3MP3ST_STATE_DIR</code> set; tool-tier <code>ApprovalController</code> is process-lifetime only</td><td><span class="src">:1164-1187</span></td></tr>
+<tr><td>Known defect</td><td><code>/approve</code> has no status precondition — a REJECTED/EXPIRED receipt can be re-approved. <code>authorize-target</code> is the strict path</td><td><span class="src">:5027 vs :5087-5090</span></td></tr>
+</table>
+<h3>Evidence → finding lifecycle</h3>
+<div class="flow">Hypothesis  ──decompose──►  Work orders (prove/disprove)
+     │                          │  run tool → evidence
+     ▼                          ▼
+Evidence entries  ──gateLiveFinding()──►  Finding  ──►  Retest queued
+   (tool-proven only; prose rejected)</div>
+<p class="src">src/server.ts:566-836; src/evidence/gate.ts</p>
+<div class="box info"><div class="box-title">The evidence contract</div>
+Every promoted finding needs tool-proven evidence, and findings should have retests queued. This is the discipline that
+separates a real finding from a plausible guess. <span class="src">src/evidence/gate.ts (Confirmed)</span></div>
+</section>
+
+<section class="section" id="p42">
+<h2>42 · Full worked example — an authorized hunt against <code>api.example.com</code></h2>
+<div class="box danger"><div class="box-title">Authorization &amp; fiction notice</div>
+<code>api.example.com</code> is a <b>fictional, authorized</b> target used only to illustrate the workflow. <b>Only test
+systems you are explicitly authorized to test.</b> This walkthrough does not, and must not, send traffic to any real
+external bug-bounty target. Commands that would hit the target are shown for completeness — run them <b>only</b> against
+your own authorized scope.</div>
+
+<h3>Step 0 — Configure &amp; start</h3>
+<div class="cmd-card"><div class="cmd-head"><span class="badge b-linux">STANDARD LINUX</span><button class="copy-btn" onclick="copyCmd(this)">copy</button></div>
+<pre><code>export T3MP3ST_STATE_DIR="$HOME/.t3mp3st/state"   # persist the engagement
+export OPENROUTER_API_KEY=YOUR_API_KEY_HERE       # or connect a local agent
+npm run server
+# open http://127.0.0.1:3333/ui</code></pre></div>
+
+<h3>Step 1 — Intake via the Admiral (⚓ Guided)</h3>
+<p>In the War Room click <b>⚓ Guided</b>. Describe the objective and scope: <em>"Access-control &amp; IDOR testing on
+<code>api.example.com</code>, non-destructive, covert-normal."</em> The Admiral drafts a directive.</p>
+
+<h3>Step 2 — Plan (Op General)</h3>
+<div class="cmd-card"><div class="cmd-head"><span class="badge b-api">API CALL</span> Equivalent API call <button class="copy-btn" onclick="copyCmd(this)">copy</button></div>
+<pre><code>curl -sS -X POST http://127.0.0.1:3333/api/general/plan \
+  -H 'Content-Type: application/json' \
+  -d '{"objective":"Access-control and IDOR testing on api.example.com","scope":["api.example.com"],"destructiveAllowed":false}' | jq '{status: .review.status, score: .review.score, blockers: .review.blockers}'</code></pre></div>
+<div class="box info">Confirm the gate chip is READY or DEGRADED. If HOLD (409-bound), fix the blockers — empty scope or a destructive request — and re-plan (Part 35).</div>
+
+<h3>Step 3 — Launch (Gate #1 confirmed) &amp; approve (Gate #3)</h3>
+<div class="cmd-card"><div class="cmd-head"><span class="badge b-api">API CALL</span> Execute — expect 403 first <button class="copy-btn" onclick="copyCmd(this)">copy</button></div>
+<pre><code>curl -sS -i -X POST http://127.0.0.1:3333/api/general/execute \
+  -H 'Content-Type: application/json' -d '{}'
+# → HTTP 403 with a pending receipt for mission_execution:api.example.com  (if not yet approved)
+# → HTTP 409 if the plan-quality gate is still HOLD</code></pre></div>
+<div class="cmd-card"><div class="cmd-head"><span class="badge b-api">API CALL</span> Approve the exact-host receipt <button class="copy-btn" onclick="copyCmd(this)">copy</button></div>
+<pre><code>curl -sS 'http://127.0.0.1:3333/api/approvals?status=pending' \
+  | jq -r '.[] | select(.target=="api.example.com") | .id'
+curl -sS -X POST http://127.0.0.1:3333/api/approvals/&lt;id&gt;/approve \
+  -H 'Content-Type: application/json' -d '{"ttlMinutes":30}'</code></pre></div>
+<p>(In the UI this is one click on <b>🧾 Scope Receipts → Approve</b>; the Admiral wizard auto-retries.)</p>
+
+<h3>Step 4 — Execution &amp; the inner gates</h3>
+<div class="flow">tick loop → OperatorAgent → Arsenal.execute()
+     │
+     ├─ Gate #4 scope: api.example.com in scope? ── else SCOPE DENIED (add target; can't approve around)
+     │
+     └─ Gate #5 tool-tier: gated tool? ── approve or T3MP3ST_APPROVED_TOOLS (expert-only)</div>
+
+<h3>Step 5 — Watch evidence &amp; findings</h3>
+<p>Findings appear under War Room <b>🔓 Findings</b> and the <b>Evidence Vault</b>. Each promoted finding needs
+tool-proven evidence (<code>gateLiveFinding</code>); queue retests per finding.</p>
+
+<h3>Step 6 — Report / bounty submission (API-only)</h3>
+<div class="box warn"><div class="box-title">No UI for bounty submission</div>
+The <code>/api/bounty/*</code> family has <b>no War Room UI</b> — format/submit are API-only. <span class="src">API ref §13</span></div>
+<div class="cmd-card"><div class="cmd-head"><span class="badge b-api">API CALL</span> Format a finding for a platform <button class="copy-btn" onclick="copyCmd(this)">copy</button></div>
+<pre><code>curl -sS http://127.0.0.1:3333/api/bounty/platforms | jq .
+curl -sS -X POST http://127.0.0.1:3333/api/bounty/format \
+  -H 'Content-Type: application/json' -d '{"findingId":"&lt;id&gt;","platform":"&lt;platform&gt;"}' | jq .
+# submit is a real outbound action — only for your authorized program/credentials:
+# curl -sS -X POST http://127.0.0.1:3333/api/bounty/submit -d '{...}'</code></pre></div>
+</section>
+
+<section class="section" id="p43">
+<h2>43 · Research doctrine — evidence over assertion</h2>
+<ol class="kv">
+<li><b>Hypothesis first.</b> Every claim starts as a hypothesis, not a finding.</li>
+<li><b>Decompose into prove/disprove work orders.</b> The planner already synthesizes both per lane — use them.</li>
+<li><b>Only tool-proven evidence promotes a finding.</b> <code>gateLiveFinding()</code> rejects prose. <span class="src">src/evidence/gate.ts</span></li>
+<li><b>Queue a retest for every finding.</b> Part of the evidence contract and a plan-quality criterion.</li>
+<li><b>Name receipts before active execution.</b> An <code>enrichPlan</code> criterion — receipts should be named before you go live. <span class="src">src/general/index.ts:666-672</span></li>
+</ol>
+<div class="box info"><div class="box-title">The plan-quality criteria the UI shows</div>
+Scope is explicit and target-bound · Specialist work orders exist for each active lane · Claims require evidence before
+promotion · Retests are queued for every finding · Receipts are named before active execution.
+<span class="src">src/general/index.ts:666-672</span></div>
+</section>
+
+<section class="section" id="p44">
+<h2>44 · Bug-bounty toolkit integration</h2>
+<table>
+<tr><th>Need</th><th>How</th><th>Note</th></tr>
+<tr><td>Recon/scan tools (nuclei, httpx, ffuf, katana…)</td><td><code>T3MP3ST_FULL_ARSENAL=1</code> + install the binary</td><td>These have structured parsers; findings auto-populate. <span class="src">src/arsenal/parsers.ts</span></td></tr>
+<tr><td>Authenticated testing</td><td><code>TEMPEST_TARGET_ORIGIN</code> + <code>TEMPEST_TARGET_HEADERS</code></td><td>Same-origin only; headers stripped across redirects. Headers carry live tokens — treat as secret. <span class="src">src/arsenal/index.ts:87</span></td></tr>
+<tr><td>Through a proxy (e.g. Burp/interception)</td><td><code>TEMPEST_PROXY_URL</code></td><td>Outbound SOCKS5</td></tr>
+<tr><td>Whitebox / source review of a repo</td><td><code>/api/whitebox/analyze</code> + <code>GITHUB_TOKEN</code></td><td>Path-contained to <code>T3MP3ST_REPO_ROOT</code></td></tr>
+<tr><td>Submit to a platform</td><td><code>/api/bounty/format</code> → <code>/api/bounty/submit</code></td><td>API-only, no UI</td></tr>
+</table>
+<div class="cmd-card"><div class="cmd-head"><span class="badge b-linux">STANDARD LINUX</span> Authenticated + proxied profile <button class="copy-btn" onclick="copyCmd(this)">copy</button></div>
+<pre><code>export TEMPEST_TARGET_ORIGIN="https://api.example.com"
+export TEMPEST_TARGET_HEADERS='{"Authorization":"Bearer YOUR_TOKEN_HERE"}'
+export TEMPEST_PROXY_URL="socks5://127.0.0.1:1080"
+export T3MP3ST_FULL_ARSENAL=1
+export T3MP3ST_STATE_DIR="$HOME/.t3mp3st/state"
+npm run server</code></pre></div>
+</section>
+
+<section class="section" id="p45">
+<h2>45 · Daily hunting workflow</h2>
+<div class="flow">1. Start server (with T3MP3ST_STATE_DIR set)  →  2. Health check /api/health
+3. ⚓ Guided intake  →  4. PLAN (check gate chip)  →  5. Fix blockers, re-plan
+6. Launch (confirmed)  →  7. Approve exact-host receipt (Scope Receipts)
+8. Monitor Findings / Evidence Vault / Work-Order Board
+9. Promote hypotheses with tool-proven evidence  →  10. Queue retests
+11. Pause/resume/stop as needed  →  12. Format &amp; (if authorized) submit</div>
+<table>
+<tr><th>Recurring check</th><th>Command / place</th></tr>
+<tr><td>Is persistence on?</td><td><code>/api/health</code> → <code>storage.driver</code></td></tr>
+<tr><td>Pending approvals</td><td><code>/api/approvals?status=pending</code> or Scope Receipts badge</td></tr>
+<tr><td>Plan gate status</td><td>Gate chip / <code>/api/general/plan</code> response</td></tr>
+<tr><td>LLM up?</td><td><code>/api/llm/status</code></td></tr>
+<tr><td>Real tool catalog</td><td><code>/api/arsenal/catalog</code> (not the UI list)</td></tr>
+</table>
+</section>
+
+<section class="section" id="p46">
+<h2>46 · Daily command cheat sheet</h2>
+<div class="cmd-card"><div class="cmd-head"><span class="badge b-npm">STANDARD NPM</span> Start / verify <button class="copy-btn" onclick="copyCmd(this)">copy</button></div>
+<pre><code>npm run server                                   # dev server (tsx)
+curl -sS http://127.0.0.1:3333/api/health | jq . # health + storage driver
+t3mp3st status                                   # provider/model/key/config path</code></pre></div>
+<div class="cmd-card"><div class="cmd-head"><span class="badge b-api">API CALL</span> Plan → execute → approve <button class="copy-btn" onclick="copyCmd(this)">copy</button></div>
+<pre><code>curl -sS -X POST http://127.0.0.1:3333/api/general/plan -H 'Content-Type: application/json' -d '{"objective":"...","scope":["api.example.com"]}' | jq '.review.status'
+curl -sS -i -X POST http://127.0.0.1:3333/api/general/execute -d '{}'      # 403/409 if gated
+curl -sS 'http://127.0.0.1:3333/api/approvals?status=pending' | jq '.[].id'
+curl -sS -X POST http://127.0.0.1:3333/api/approvals/&lt;id&gt;/approve -d '{"ttlMinutes":30}'</code></pre></div>
+<div class="cmd-card"><div class="cmd-head"><span class="badge b-api">API CALL</span> Mission control <button class="copy-btn" onclick="copyCmd(this)">copy</button></div>
+<pre><code>curl -sS http://127.0.0.1:3333/api/mission/status | jq .
+curl -sS -X POST http://127.0.0.1:3333/api/mission/pause
+curl -sS -X POST http://127.0.0.1:3333/api/mission/resume
+curl -sS -X POST http://127.0.0.1:3333/api/mission/stop</code></pre></div>
+</section>
+
+<section class="section" id="p47">
+<h2>47 · Fresh install cheat sheet</h2>
+<div class="cmd-card"><div class="cmd-head"><span class="badge b-linux">STANDARD LINUX</span> Clone → run, start to finish <button class="copy-btn" onclick="copyCmd(this)">copy</button></div>
+<pre><code>node -v                                   # must be >= 22.19.0
+git clone git@github.com:eddocg/T3MP3ST.git
+cd T3MP3ST
+npm ci                                     # exact install from package-lock.json
+npm run setup                              # store a provider key (or connect a local agent)
+export T3MP3ST_STATE_DIR="$HOME/.t3mp3st/state"
+npm run server                             # → http://127.0.0.1:3333/ui
+# built/prod path instead of dev:
+# npm run build && npm run server:prod</code></pre></div>
+<table>
+<tr><th>Step</th><th>Authority</th></tr>
+<tr><td><code>git clone</code></td><td><span class="badge b-git">STANDARD GIT</span></td></tr>
+<tr><td><code>npm ci</code> / <code>npm run …</code></td><td><span class="badge b-npm">STANDARD NPM</span></td></tr>
+<tr><td><code>npm run setup</code> / <code>server</code></td><td><span class="badge b-project">PROJECT COMMAND</span></td></tr>
+<tr><td><code>export T3MP3ST_STATE_DIR</code></td><td><span class="badge b-linux">STANDARD LINUX</span> + <span class="tag t-rec">RECOMMENDED</span></td></tr>
+</table>
+</section>
+
+<section class="section" id="p48">
+<h2>48 · Update cheat sheet</h2>
+<div class="cmd-card"><div class="cmd-head"><span class="badge b-git">STANDARD GIT</span> + <span class="badge b-npm">STANDARD NPM</span> One-shot update <button class="copy-btn" onclick="copyCmd(this)">copy</button></div>
+<pre><code>cp -a "$T3MP3ST_STATE_DIR" "$T3MP3ST_STATE_DIR.bak.$(date +%Y%m%d)"   # back up state (server stopped)
+git pull --ff-only origin develop
+npm ci
+npm run build            # only needed for the prod path
+npm run typecheck && npm test
+npm run server:prod      # restart (or npm run server for dev)</code></pre></div>
+<div class="box info"><div class="box-title">Rollback in one line</div>
+<code>git checkout &lt;good-sha&gt; &amp;&amp; npm ci &amp;&amp; npm run build</code> — then restore the state backup if a bad
+version touched <code>state.json</code> (Parts 22–23).</div>
+</section>
+
+<section class="section" id="p50">
+<h2>50 · Troubleshooting — install &amp; build</h2>
+<table>
+<tr><th>Symptom</th><th>Cause</th><th>Fix</th></tr>
+<tr><td>Server won't start / crashes on boot</td><td>Node &lt; 22.19.0, or a boot-stage failure</td><td>Check <code>node -v</code>; boot order is state→proxy→LLM→grammars→listen. Unhandled rejections are logged, not fatal. <span class="src">package.json engines; src/server.ts:7969-8019</span></td></tr>
+<tr><td><code>Cannot find module dist/…</code></td><td>Ran the built path before building</td><td><code>npm run build</code> first, or use <code>npm run server</code> (dev)</td></tr>
+<tr><td><code>ERR_MODULE_NOT_FOUND</code></td><td>ESM project (<code>"type":"module"</code>)</td><td>Use <code>node dist/*.js</code>, not <code>require()</code></td></tr>
+<tr><td><code>npm ci</code> fails</td><td>Lockfile/Node mismatch, or musl/glibc <code>node_modules</code> copied into a container</td><td>Ensure Node ≥ 22.19; don't copy host <code>node_modules</code> into the image (it's in <code>.dockerignore</code>)</td></tr>
+</table>
+</section>
+
+<section class="section" id="p51">
+<h2>51 · Troubleshooting — runtime, LLM, connectivity</h2>
+<table>
+<tr><th>Symptom</th><th>Cause</th><th>Fix</th></tr>
+<tr><td>"No LLM configured" / provider errors</td><td>No key resolved and no local agent connected</td><td><code>npm run setup</code>, export a provider key, connect a local agent (<code>/api/agents/local/connect</code>), or point at a local model (<code>TEMPEST_LOCAL_BASE_URL</code>). <span class="src">src/config/index.ts:816-859</span></td></tr>
+<tr><td>UI loads but can't reach backend</td><td><code>T3MP3ST_API.baseUrl</code> empty = "standalone mode" (client-only, e.g. GitHub Pages)</td><td>Serve the UI from the running server at <code>/ui</code> so it talks to <code>:3333</code></td></tr>
+<tr><td>Can't reach server from another machine</td><td>Bound to <code>127.0.0.1</code> by default</td><td><code>T3MP3ST_HOST=0.0.0.0</code> — ⚠️ exposes a command-executing API &amp; disables the Host-header guard; only behind trusted controls. <span class="src">src/server.ts:152</span></td></tr>
+<tr><td>Health <code>version</code> says 0.2.1 but CLI says 1.0.0</td><td>Known internal inconsistency</td><td>Not an error — see Part 60. <span class="src">src/server.ts:4399-4426</span></td></tr>
+</table>
+</section>
+
+<section class="section" id="p52">
+<h2>52 · Troubleshooting — Git update</h2>
+<table>
+<tr><th>Symptom</th><th>Cause</th><th>Fix</th></tr>
+<tr><td><code>git pull --ff-only</code> refuses</td><td>Local commits/edits diverge from remote</td><td><code>git stash</code> → pull → <code>git stash pop</code>, or commit to your own branch</td></tr>
+<tr><td>Runtime errors after pull</td><td>Skipped <code>npm ci</code> after a dependency bump</td><td>Always <code>npm ci</code> before rebuild/restart (Part 20)</td></tr>
+<tr><td>Built server runs old code</td><td>Forgot <code>npm run build</code> after pulling</td><td>Rebuild, or run the dev path (<code>npm run server</code>) which needs no build</td></tr>
+<tr><td>State looks wrong after update</td><td>Code rolled forward but state is independent</td><td>Restore a state backup (Part 23); there is no migration command</td></tr>
+</table>
+</section>
+
+<section class="section" id="p53">
+<h2>53 · Troubleshooting — missions &amp; state</h2>
+<table>
+<tr><th>Symptom</th><th>Cause</th><th>Fix</th></tr>
+<tr><td>All missions/approvals/evidence vanished after restart</td><td>No persistence by default (<code>stateRoot()</code>='memory')</td><td>Set <code>T3MP3ST_STATE_DIR</code> <b>before</b> the engagement. <span class="src">src/server.ts:926-929</span></td></tr>
+<tr><td>Docker still doesn't persist</td><td><code>docker-compose.yml</code> doesn't set <code>T3MP3ST_STATE_DIR</code></td><td>Add it to the compose <code>environment</code> and mount that path</td></tr>
+<tr><td>Setting state dir changed the "mode"</td><td><code>currentMode()</code> operator-precedence quirk forces <code>'t3mp3st'</code> for any truthy state dir</td><td>Cosmetic, harmless. <span class="src">src/server.ts:923</span></td></tr>
+<tr><td>Mission auto-paused unexpectedly</td><td><code>OpsecController.isAbortRecommended()</code> (rare — <code>recordDetection()</code> has no live caller)</td><td>Resume via <code>/api/mission/resume</code>. <span class="src">src/index.ts:932-935</span></td></tr>
+<tr><td>OPSEC level changed nothing</td><td>OPSEC is largely advisory (Part 37)</td><td>Expected — don't rely on it for stealth</td></tr>
+</table>
+</section>
+
+<section class="section" id="p54">
+<h2>54 · Troubleshooting — approvals &amp; gates</h2>
+<table>
+<tr><th>Symptom</th><th>Cause</th><th>Fix</th></tr>
+<tr><td>EXECUTE says HELD / HTTP <b>409</b></td><td>Plan-quality gate returned <code>hold</code></td><td>Bind scope, give each hunt lane its work orders, drop destructive requests, re-plan. <span class="src">src/general/index.ts:1097-1220</span></td></tr>
+<tr><td>Launch returns HTTP <b>403</b> + "pending receipt"</td><td><code>guardAction('mission_execution')</code> found no fresh approval</td><td>Approve on Scope Receipts (or the inline modal). Loopback/lab &amp; AUTONOMOUS auto-approve. <span class="src">src/server.ts:1319-1332</span></td></tr>
+<tr><td>Approved but still blocked</td><td>409 (plan) and 403 (approval) are independent; or receipt expired; or exact-host mismatch</td><td>Clear both gates; re-approve if expired (30-min TTL); approve the exact host (<code>api.example.com</code> ≠ <code>example.com</code>). <span class="src">:5035, :1238-1249</span></td></tr>
+<tr><td>Rejected receipt became approved</td><td>Verified defect: <code>/approve</code> has no status precondition</td><td>Use <code>authorize-target</code> (enforces pending-only). <span class="src">:5027 vs :5087-5090</span></td></tr>
+</table>
+</section>
+
+<section class="section" id="p55">
+<h2>55 · Troubleshooting — execution &amp; tools</h2>
+<table>
+<tr><th>Symptom</th><th>Cause</th><th>Fix</th></tr>
+<tr><td>Tool returns <code>SCOPE DENIED</code></td><td>Target host not in authorized scope; <b>cannot be approved around</b></td><td>Add the target to the mission (scope derives from <code>TargetEnvironment</code>). Loopback &amp; RFC-1918 always allowed. <span class="src">src/arsenal/index.ts:251-287</span></td></tr>
+<tr><td>Gated tool (metasploit/hydra/sqlmap) denied in headless</td><td>Tool-tier fail-safe deny — no approver, not pre-authorized</td><td>Provide an interactive approver, or set <code>T3MP3ST_APPROVED_TOOLS</code> (⚠️ expert-only). <span class="src">src/arsenal/approval.ts:188-195</span></td></tr>
+<tr><td>Arsenal tool listed but doesn't run</td><td>UI list is a hardcoded array; tool not registered/installed/armed</td><td>Set <code>T3MP3ST_FULL_ARSENAL=1</code>, install the binary; check <code>/api/arsenal/catalog</code>. <span class="src">docs/index.html:7102</span></td></tr>
+<tr><td>Tool runs but no structured findings</td><td>Most adapters are <code>parserStatus:'planned'</code> (raw stdout only)</td><td>Only nuclei/httpx/dalfox/ffuf/katana/semgrep/gitleaks/trivy/grype/garak auto-populate. <span class="src">src/arsenal/parsers.ts</span></td></tr>
+<tr><td>Specialist tool invoked with wrong args</td><td>Missing bespoke <code>ARG_TEMPLATE</code>; bare positional fallback</td><td>Known gap for subcommand tools (aws/az/gcloud/ghidra/gdb). <span class="src">src/arsenal/catalog.ts + adapter-tools.ts</span></td></tr>
+<tr><td>"Deploy All" operators does nothing</td><td>Operatives page spawn is client-only state</td><td>Start a mission to actually spawn operators. <span class="src">docs/index.html:8062-8107</span></td></tr>
+</table>
+</section>
+
+<section class="section" id="p56">
+<h2>56 · Control-plane security</h2>
+<div class="box danger"><div class="box-title">This is a command-executing API with no authentication</div>
+The backend can run tools and subprocesses and has <b>no built-in auth</b>. Its entire safety model is "bind to loopback."
+Anyone who can reach the port can drive it. <span class="src">src/server.ts:144-158 (security comment)</span></div>
+<table>
+<tr><th>Control</th><th>State</th><th>Operator action</th></tr>
+<tr><td>Network bind</td><td>Loopback default; <code>0.0.0.0</code> under <code>DOCKER=true</code></td><td>Keep loopback; if exposing, front with authenticated proxy/VPN (Part 7)</td></tr>
+<tr><td>Host-header allowlist</td><td>Active only on loopback bind</td><td>Don't bind non-loopback without external auth — the guard turns off</td></tr>
+<tr><td>Approval gates</td><td>403 (server) + tool-tier; one weak path (<code>/approve</code> no precondition)</td><td>Prefer <code>authorize-target</code>; don't rely on re-approve behavior</td></tr>
+<tr><td><code>scope.authorized</code> for local targets</td><td>Client-trusted — a client can assert authorization to skip approval for local actions</td><td>Treat the client as trusted; don't expose the API. <span class="src">operationAllowsLocalAction</span></td></tr>
+<tr><td>Dangerous flags</td><td><code>T3MP3ST_APPROVED_TOOLS</code>, <code>T3MP3ST_HERMES_YOLO</code>, <code>T3MP3ST_FULL_ARSENAL</code></td><td>Set only deliberately — they authorize tools / disable gates</td></tr>
+<tr><td>Target headers</td><td><code>TEMPEST_TARGET_HEADERS</code> carries live tokens; same-origin only, stripped on redirect</td><td>Treat as a secret; scope to the exact origin</td></tr>
+</table>
+<div class="box warn"><div class="box-title">Golden rule</div>
+Run it on the operator's own machine, bound to loopback, single-user. Everything else is an explicit risk decision.</div>
+</section>
+
+<section class="section" id="p58">
+<h2>58 · Data &amp; state safety</h2>
+<table>
+<tr><th>Concern</th><th>Reality</th><th>Practice</th></tr>
+<tr><td>Default persistence</td><td>None — in-memory; restart wipes everything</td><td>Set <code>T3MP3ST_STATE_DIR</code> for any real work (Part 6)</td></tr>
+<tr><td>Backups</td><td>State is a plain <code>state.json</code> + <code>events.jsonl</code></td><td>Stop server, <code>tar</code> the files (Part 23)</td></tr>
+<tr><td>Torn writes</td><td>Debounced 1 s writes; copying live can capture a partial file</td><td>Always stop before copying</td></tr>
+<tr><td>Concurrent servers on one state dir</td><td>Last-writer-wins; they clobber each other</td><td>One server per state dir</td></tr>
+<tr><td>Shutdown</td><td>Flushes state, but doesn't drain connections</td><td>Expect possible cut in-flight requests; state is safe</td></tr>
+<tr><td>Secrets in shell history</td><td>Keys on the command line persist in history</td><td>Use <code>~/.t3mp3st/</code> store (setup) or a home-dir <code>.env</code></td></tr>
+</table>
+<p class="src">src/server.ts:926-939, 1127-1143, 1164-1187, 8009-8017</p>
+</section>
+
+<section class="section" id="p59">
+<h2>59 · Source code map</h2>
+<table>
+<tr><th>Path</th><th>Role</th></tr>
+<tr><td><code>src/server.ts</code></td><td>Express backend, ~8078 lines, ~129 routes, all ledgers (god-file)</td></tr>
+<tr><td><code>src/cli.ts</code></td><td>CLI entrypoint (commander; 5 commands)</td></tr>
+<tr><td><code>src/mcp-server.ts</code></td><td>MCP server entrypoint</td></tr>
+<tr><td><code>src/index.ts</code></td><td><code>TempestCommand</code> engine + tick loop; most <code>T3MP3ST_*</code> flags read here</td></tr>
+<tr><td><code>src/admiral/index.ts</code></td><td>Admiral intake (<code>briefToDirective</code>, anti-fitting guards)</td></tr>
+<tr><td><code>src/general/index.ts</code></td><td>Op General planner (<code>planOperation</code>, <code>reviewPlan</code>, <code>enrichPlan</code>)</td></tr>
+<tr><td><code>src/arsenal/</code></td><td>Tool registry, catalog, adapters, parsers, scope &amp; tool-tier approval</td></tr>
+<tr><td><code>src/config/index.ts</code></td><td>Config store, key resolution, model catalog, env loader</td></tr>
+<tr><td><code>src/opsec/index.ts</code></td><td>OPSEC (mostly advisory)</td></tr>
+<tr><td><code>src/evidence/gate.ts</code></td><td><code>gateLiveFinding()</code> — evidence honesty gate</td></tr>
+<tr><td><code>src/agent/local-agents.ts</code></td><td>Local coding-agent integration</td></tr>
+<tr><td><code>src/stubs/index.ts</code></td><td>14 honest placeholders (ExploitEngine, ScannerOrchestrator, …)</td></tr>
+<tr><td><code>docs/index.html</code></td><td>The War Room SPA (~1.6 MB vanilla JS, no build)</td></tr>
+</table>
+</section>
+
+<section class="section" id="p60">
+<h2>60 · Documentation vs implementation</h2>
+<table>
+<tr><th>#</th><th>Conflict</th><th>Reality (source wins)</th></tr>
+<tr><td>1</td><td>Health <code>version:"0.2.1"</code> vs <code>package.json</code>/CLI <code>1.0.0</code></td><td>Two different version strings; <code>package.json</code> is <code>1.0.0</code>. <span class="src">src/server.ts:4399-4426 vs package.json / src/cli.ts</span></td></tr>
+<tr><td>2</td><td><code>WHITEPAPER.md:552</code> calls <code>/api/general/plan</code> "Op Admiral"</td><td>It is Op <b>General</b>. The UI page name is a misnomer. <span class="src">src/general/index.ts</span></td></tr>
+<tr><td>3</td><td><code>.env.example</code> documents ~10 of ~45 real env vars</td><td>Security-relevant flags (<code>T3MP3ST_APPROVED_TOOLS</code>, <code>T3MP3ST_HERMES_YOLO</code>, <code>T3MP3ST_FULL_ARSENAL</code>, <code>T3MP3ST_GATE_BUILTINS</code>, <code>T3MP3ST_STATE_DIR</code>, <code>T3MP3ST_HOST</code>) undocumented; <code>LLM_MODEL</code>/<code>GROQ</code>/<code>TOGETHER</code>/<code>REPLICATE</code> are dead. See Part 5.</td></tr>
+<tr><td>4</td><td>OPSEC described as active stealth</td><td>Largely advisory; jitter/blending/sanitization have no callers (Part 37)</td></tr>
+<tr><td>5</td><td><code>mission_execution</code> &amp; the 409 plan gate undocumented in prose</td><td>Both real &amp; enforced, only in code/UI. See Part 35.</td></tr>
+<tr><td>6</td><td>OPSEC vocab mismatch (<code>overt|normal|covert|ghost</code> vs <code>silent|covert|loud</code>)</td><td>Two vocabularies; only <code>covert</code> shared. <span class="src">src/server.ts:1388; src/types/index.ts:357</span></td></tr>
+<tr><td>7</td><td>Dockerfile <code>CMD</code> runs the dev/tsx path despite building</td><td><code>CMD ["npm","run","server"]</code> = <code>tsx src/server.ts</code>, not <code>dist</code>. <span class="src">Dockerfile</span></td></tr>
+</table>
+</section>
+
+<section class="section" id="p61">
+<h2>61 · Known UX gaps (UI/backend drift)</h2>
+<table>
+<tr><th>Gap</th><th>Detail</th></tr>
+<tr><td>Arsenal page hardcoded</td><td>Renders a ~85-item client array, not <code>/api/arsenal/catalog</code> — can drift from what's registered/installed</td></tr>
+<tr><td>Operator spawn client-only</td><td><code>/api/operators/spawn</code> &amp; <code>/:id/task</code> never called by the UI; real spawn is inside <code>/api/mission/start</code></td></tr>
+<tr><td><code>authorize-target</code> has no UI</td><td>UI always approves per-receipt-id; the stricter target-authorize path is API-only</td></tr>
+<tr><td><code>/api/bounty/*</code> has no UI</td><td>platforms/format/submit/programs/credentials are backend-only</td></tr>
+</table>
+<p class="src">docs/index.html:7102, 8062-8107; src/server.ts:5044, 6606/6678; API ref §13</p>
+</section>
+
+<section class="section" id="p62">
+<h2>62 · Quick decision guide</h2>
+<div class="flow">Q: Missions vanish on restart?          → set T3MP3ST_STATE_DIR (Part 6)
+Q: Blocked with HTTP 409?               → plan-quality gate: fix scope/work-orders/destructive, re-plan (Part 54)
+Q: Blocked with HTTP 403?               → approve the exact-host receipt on Scope Receipts (Part 54)
+Q: SCOPE DENIED?                        → add the target; cannot be approved around (Part 55)
+Q: Gated tool denied headless?          → interactive approver or T3MP3ST_APPROVED_TOOLS (Part 55)
+Q: Need a route with no UI?             → call the API directly (Part 26/28)
+Q: "Op Admiral" page confuses me?       → it's Op General; Admiral = "⚓ Guided" (Part 34)
+Q: OPSEC not changing behavior?         → it's advisory (Part 37)
+Q: Can't reach from another machine?    → T3MP3ST_HOST=0.0.0.0, but understand the risk (Part 7)
+Q: Which version is real?               → package.json = 1.0.0; health says 0.2.1 (Part 60)</div>
+</section>
+
+<section class="section" id="howto">
+<h2>"How do I…?" index</h2>
+<table>
+<tr><th>How do I…</th><th>Go to</th></tr>
+<tr><td>…install it from scratch</td><td><a href="#p47">Part 47</a> · <a href="#p3">3</a> · <a href="#p4">4</a></td></tr>
+<tr><td>…set up my LLM key</td><td><a href="#p11">Part 11</a> · <a href="#p9">9</a> · <a href="#p5">5</a></td></tr>
+<tr><td>…start the server</td><td><a href="#p14">Part 14</a> · <a href="#p12">12</a></td></tr>
+<tr><td>…make missions survive a restart</td><td><a href="#p6">Part 6</a></td></tr>
+<tr><td>…verify it's actually running</td><td><a href="#p16">Part 16</a></td></tr>
+<tr><td>…find every environment variable</td><td><a href="#p5">Part 5</a></td></tr>
+<tr><td>…run a full bug-bounty hunt</td><td><a href="#p42">Part 42</a></td></tr>
+<tr><td>…approve an "Op Admiral" plan</td><td><a href="#p35">Part 35</a> · <a href="#p30">30</a> · <a href="#p54">54</a></td></tr>
+<tr><td>…understand 403 vs 409</td><td><a href="#p35">Part 35</a> · <a href="#p54">54</a></td></tr>
+<tr><td>…fix "SCOPE DENIED"</td><td><a href="#p55">Part 55</a></td></tr>
+<tr><td>…arm metasploit/hydra/sqlmap</td><td><a href="#p40">Part 40</a> · <a href="#p8">8</a> · <a href="#p55">55</a></td></tr>
+<tr><td>…test through a proxy / with auth headers</td><td><a href="#p44">Part 44</a></td></tr>
+<tr><td>…update to the latest code</td><td><a href="#p20">Part 20</a> · <a href="#p48">48</a></td></tr>
+<tr><td>…roll back a bad update</td><td><a href="#p22">Part 22</a></td></tr>
+<tr><td>…back up / restore state</td><td><a href="#p23">Part 23</a></td></tr>
+<tr><td>…expose it on the network (and the risk)</td><td><a href="#p7">Part 7</a> · <a href="#p56">56</a></td></tr>
+<tr><td>…call the API directly</td><td><a href="#p27">Part 27</a> · <a href="#p28">28</a></td></tr>
+<tr><td>…submit to a bounty platform</td><td><a href="#p42">Part 42 (Step 6)</a> · <a href="#p44">44</a></td></tr>
+<tr><td>…tell which "version" is real</td><td><a href="#p60">Part 60</a></td></tr>
+<tr><td>…understand why OPSEC does nothing</td><td><a href="#p37">Part 37</a></td></tr>
+</table>
+<p class="lead" style="margin-top:2rem">End of manual · Verified against T3MP3ST at commit <code>afc9dad</code> (branch <code>develop</code>).</p>
+</section>
+
+</main>
+</div>
+<button class="backtop" id="backtop" onclick="window.scrollTo({top:0,behavior:'smooth'})">↑</button>
+<script>
+// copy buttons
+function copyCmd(btn){
+  const pre=btn.closest('.cmd-card').querySelector('code');
+  const txt=pre.innerText;
+  navigator.clipboard.writeText(txt).then(()=>{
+    const o=btn.textContent;btn.textContent='✓ copied';btn.classList.add('copied');
+    setTimeout(()=>{btn.textContent=o;btn.classList.remove('copied')},1400);
+  });
+}
+// toc filter
+function filterToc(q){
+  q=q.trim().toLowerCase();
+  const links=document.querySelectorAll('#toc a');let any=false;
+  links.forEach(a=>{const m=a.textContent.toLowerCase().includes(q);a.classList.toggle('hidden',!m);if(m)any=true;});
+  document.querySelectorAll('#toc .toc-group').forEach(g=>{g.style.display=q?'none':'';});
+  document.getElementById('noResults').style.display=(q&&!any)?'block':'none';
+}
+// back to top
+const bt=document.getElementById('backtop');
+window.addEventListener('scroll',()=>{bt.classList.toggle('show',window.scrollY>500)});
+// "/" focuses search
+document.addEventListener('keydown',e=>{if(e.key==='/'&&document.activeElement.tagName!=='INPUT'){e.preventDefault();document.getElementById('tocSearch').focus()}});
+// close mobile sidebar on nav click
+document.querySelectorAll('#toc a').forEach(a=>a.addEventListener('click',()=>document.getElementById('sidebar').classList.remove('open')));
+</script>
+</body>
+</html>

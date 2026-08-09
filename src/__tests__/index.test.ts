@@ -419,6 +419,89 @@ describe('Wedged-dispatch timeout backstop', () => {
     expect(stopped).toBe(true);
   });
 
+  describe('late-result reconciliation after a timeout backstop', () => {
+    // Build a TempestCommand + a standalone TaskQueue holding one task that the
+    // backstop has already force-failed as a timeout. reconcileLateResult() is the
+    // exact bridge between "backstop marked it failed" and "the operator promise
+    // later settled" — so we drive it directly for a fast, deterministic check.
+    const makeFixture = async () => {
+      const mod = await import('../index.js');
+      const { TaskQueue } = await import('../mission/index.js');
+      const command = new mod.TempestCommand({ name: 'Reconcile Op', llm: { provider: 'mock', model: 'mock-model' } }) as any;
+      const tq = new TaskQueue();
+      const task = {
+        id: 'task-late', missionId: 'm1', name: 'Automated Vulnerability Scan',
+        description: 'scan api.example.com', phase: 'reconnaissance' as any,
+        operatorType: 'recon' as const, status: 'pending' as const,
+        priority: 1, dependencies: [], createdAt: Date.now(),
+      };
+      tq.add(task as any);
+      // Simulate the backstop having reaped this dispatch as a timeout.
+      tq.fail(task.id, 'timeout: dispatch timed out after 300s (backstop 300s)');
+      command.timedOutDispatches.add(task.id);
+      return { command, tq, task };
+    };
+
+    it('flips a timed-out task failed→completed when the operator later succeeds', async () => {
+      const { command, tq, task } = await makeFixture();
+      let hookFired = false;
+      command.hooks.onTaskCompleted = () => { hookFired = true; };
+
+      command.reconcileLateResult(tq, task, { success: true, output: 'scan done', findings: ['cors-misconfig'] });
+
+      const t = tq.getTask(task.id)!;
+      expect(t.status).toBe('completed');
+      expect(t.result?.success).toBe(true);
+      expect(t.result?.findings).toEqual(['cors-misconfig']);
+      // Breadcrumb: the audit trail records that it landed after the backstop fired.
+      expect(t.result?.output).toContain('[reconciled]');
+      expect(t.result?.output).toContain('scan done');
+      expect(hookFired).toBe(true);
+      // Membership consumed — a second settle must not re-run.
+      expect(command.timedOutDispatches.has(task.id)).toBe(false);
+    });
+
+    it('leaves a timed-out task failed when the operator later also fails', async () => {
+      const { command, tq, task } = await makeFixture();
+      command.reconcileLateResult(tq, task, { success: false, error: 'real failure' });
+
+      const t = tq.getTask(task.id)!;
+      expect(t.status).toBe('failed');
+      // The original timeout error is preserved, not overwritten by the late failure.
+      expect(t.result?.error).toContain('timeout');
+      expect(command.timedOutDispatches.has(task.id)).toBe(false);
+    });
+
+    it('ignores a late result for a task it never timed out', async () => {
+      const { command, tq, task } = await makeFixture();
+      command.timedOutDispatches.delete(task.id); // pretend this one was never reaped
+      command.reconcileLateResult(tq, task, { success: true, output: 'done' });
+
+      // Untouched — still the backstop-independent failed state we seeded.
+      expect(tq.getTask(task.id)!.status).toBe('failed');
+    });
+
+    it('does not resurrect a task that already reached completed elsewhere', async () => {
+      const { command, tq, task } = await makeFixture();
+      tq.complete(task.id, { success: true, output: 'completed by another path' });
+      command.reconcileLateResult(tq, task, { success: true, output: 'late' });
+
+      const t = tq.getTask(task.id)!;
+      expect(t.status).toBe('completed');
+      expect(t.result?.output).toBe('completed by another path'); // not overwritten
+      expect(command.timedOutDispatches.has(task.id)).toBe(false); // marker still consumed
+    });
+
+    it('reconciles at most once per timeout (second settle is a no-op)', async () => {
+      const { command, tq, task } = await makeFixture();
+      command.reconcileLateResult(tq, task, { success: true, output: 'first' });
+      // Force it back to failed and try again — without the marker it must stay failed.
+      tq.fail(task.id, 'manual');
+      command.reconcileLateResult(tq, task, { success: true, output: 'second' });
+      expect(tq.getTask(task.id)!.status).toBe('failed');
+    });
+  });
+
   it('a wedged mission stalls instead of advancing after required recon dispatches time out', async () => {
     // Tiny backstop so the test is fast and deterministic.
     const prev = process.env.T3MP3ST_TASK_TIMEOUT_MS;
