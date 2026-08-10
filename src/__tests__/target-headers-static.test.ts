@@ -177,7 +177,8 @@ describe('per-mission runtime target headers (UI-supplied, no env, no persistenc
     const names = setRuntimeTargetHeaders('https://api.example', JSON.stringify({
       Authorization: 'Bearer ui-secret', 'X-API-Key': 'ui-key',
     }));
-    expect(names).toEqual(['Authorization', 'X-API-Key']);
+    // Names come back through the WHATWG Headers object, which normalizes them to lowercase.
+    expect(names).toEqual(['authorization', 'x-api-key']);
     // The value is never surfaced by the binder — only names come back.
     expect(JSON.stringify(names)).not.toContain('ui-secret');
   });
