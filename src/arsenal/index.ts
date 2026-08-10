@@ -123,8 +123,9 @@ function buildTargetHeaderConfig(rawOrigin?: string, rawHeaders?: string): Targe
  * Bind per-mission authenticated-target headers for this process run. Returns the redaction-safe list
  * of header NAMES that were accepted (values are never returned or logged), or null if the config was
  * rejected (malformed JSON, non-string value, forbidden transport header, or bad origin) — fail closed.
- * The caller can surface the names (e.g. "Authenticated target headers supplied: Authorization, X-API-Key")
- * without exposing any secret value.
+ * Names come back through the WHATWG Headers object, so they are normalized to lowercase (caller-supplied
+ * casing is NOT preserved). The caller can surface them (e.g. "Authenticated target headers supplied:
+ * authorization, x-api-key") without exposing any secret value.
  */
 export function setRuntimeTargetHeaders(origin: string, headersJson: string): string[] | null {
   const config = buildTargetHeaderConfig(origin, headersJson);
