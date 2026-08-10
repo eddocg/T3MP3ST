@@ -26816,7 +26816,7 @@ Be specific and actionable. Format as structured JSON.`;
   // operators). Op Admiral's planning is a slow LLM call, so we DON'T block the modal: we close
   // the wizard + jump to the War Room immediately (where the SitRep + System Events show live SSE
   // planning progress), and the await below resolves in the background to confirm or surface errors.
-  window.admiralLaunch = async function(){
+  window.admiralLaunch = async function(seedApprovalIds){
     const t = TYPES.find(x=>x.id===S.type);
     const bb = _admBackbone();
     const brief = _admBrief('live');
@@ -26833,9 +26833,15 @@ Be specific and actionable. Format as structured JSON.`;
     window.retryPendingAdmiralLaunch = function(){
       if (!window.__t3mpAdmiralPendingRetry) return;
       window.__t3mpAdmiralPendingRetry = false;
+      // Carry the operator-approved receipt id(s) back into the relaunch. Without this the
+      // retry re-runs with an empty body, the server's id-keyed findApproval misses the
+      // already-approved receipt, and guardAction mints a DUPLICATE pending receipt while the
+      // mission never starts. Mirrors the blessed generalFullAuto approve-then-resume flow.
+      var pendingIds = Array.isArray(window.__t3mpAdmiralPendingApprovalIds) ? window.__t3mpAdmiralPendingApprovalIds.slice() : [];
+      window.__t3mpAdmiralPendingApprovalIds = [];
       if (typeof addIntel === 'function') addIntel('SCOPEGUARD', 'Receipt approved — retrying Admiral launch', 'info');
       if (window.toast) toast('Receipt approved — retrying Admiral launch', 'info');
-      setTimeout(function(){ window.admiralLaunch(); }, 50);
+      setTimeout(function(){ window.admiralLaunch(pendingIds); }, 50);
     };
     const admiralApiBase = (typeof getApiBase === 'function')
       ? getApiBase()
@@ -26850,8 +26856,10 @@ Be specific and actionable. Format as structured JSON.`;
     // cautious rather than declaring failure.
     const launchOpts = function(extra){ return { method:'POST', headers:{'Content-Type':'application/json'}, body: body(extra), signal: AbortSignal.timeout(330000) }; };
     try {
-      let approvalIds = [];
-      let res = await admiralFetch('/api/admiral/launch', launchOpts());
+      // Seed with any receipt ids the operator approved on a prior manual round so the
+      // server can reuse them (findApproval is id-keyed) instead of minting duplicates.
+      let approvalIds = (Array.isArray(seedApprovalIds) ? seedApprovalIds : []).filter(function(id, idx, arr){ return id && arr.indexOf(id) === idx; });
+      let res = await admiralFetch('/api/admiral/launch', approvalIds.length ? launchOpts({ approvalIds: approvalIds }) : launchOpts());
       let d = await res.json();
       for (let approvalRound = 0; approvalRound < 5 && res.status === 403; approvalRound++) {
         const requested = [];
@@ -26872,6 +26880,10 @@ Be specific and actionable. Format as structured JSON.`;
           continue;
         }
         window.__t3mpAdmiralPendingRetry = true;
+        // Remember the pending receipt id(s) so retryPendingAdmiralLaunch can thread the
+        // operator-approved id back into the relaunch (see the retry hook above) — otherwise
+        // the server mints a duplicate receipt on resume and the mission never starts.
+        window.__t3mpAdmiralPendingApprovalIds = approvalIds.concat(requestedIds).filter(function(id, idx, arr){ return id && arr.indexOf(id) === idx; });
         addIntel?.('SCOPEGUARD', 'Approval required: ' + (targets || tgt) + ' — open Scope Receipts', 'warning');
         navigateTo?.('receipts');
         throw new Error((d.error || 'Approval required') + ' — approve ' + (targets || 'pending targets') + ' in Scope Receipts; launch will retry after approval.');

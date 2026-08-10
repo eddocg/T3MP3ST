@@ -130,6 +130,29 @@ describe('local API authorization hardening invariants', () => {
     expect(uiSource).toMatch(/__t3mpPendingApprovalReceiptIds\?\.includes\(id\)/);
   });
 
+  it('Admiral manual approve-then-resume threads the approved receipt id back instead of minting a duplicate', () => {
+    const start = uiSource.indexOf('window.admiralLaunch = async function');
+    const end = uiSource.indexOf('})();', start);
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+    const admiral = uiSource.slice(start, end);
+
+    // The launcher accepts prior-approved ids and seeds approvalIds from them, so the very
+    // first relaunch call carries the receipt the operator approved (server findApproval is
+    // id-keyed — an empty body would miss it and guardAction would forge a duplicate).
+    expect(admiral).toMatch(/window\.admiralLaunch = async function\(seedApprovalIds\)/);
+    expect(admiral).toMatch(/let approvalIds = \(Array\.isArray\(seedApprovalIds\)/);
+    expect(admiral).toMatch(/approvalIds\.length \? launchOpts\(\{ approvalIds: approvalIds \}\) : launchOpts\(\)/);
+
+    // The manual (non-lab, non-autonomous) 403 branch records the pending ids, and the retry
+    // hook relaunches WITH them — not a bare admiralLaunch() that drops the approved id.
+    expect(admiral).toMatch(/window\.__t3mpAdmiralPendingApprovalIds = approvalIds\.concat\(requestedIds\)/);
+    expect(admiral).toMatch(/window\.__t3mpAdmiralPendingApprovalIds\.slice\(\)/);
+    expect(admiral).toMatch(/window\.admiralLaunch\(pendingIds\)/);
+    // Guard against a regression back to the id-less resume.
+    expect(admiral).not.toMatch(/setTimeout\(function\(\)\{ window\.admiralLaunch\(\); \}, 50\)/);
+  });
+
   it('approval lookup requires explicit receipt ids and wildcard hosts require opt-in', () => {
     const findApproval = routeBlock('function findApproval(', 'function createApprovalRequest');
     const approvalMatches = sourceBlock('function approvalMatches(', 'function ensureExecTargetsWithinApprovedTarget');
