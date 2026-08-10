@@ -34,6 +34,17 @@ export interface MissionBrief {
   family: MissionFamilyId | '';
   scope: string;
   fidelity: Fidelity;
+  /**
+   * Optional free-text operator guidance gathered during the planning/review cycle
+   * (rate limits, forbidden actions, research emphasis, evidence requirements,
+   * business-logic hypotheses, e.g. "do not perform physical lock/unlock without
+   * explicit operator confirmation"). This is folded into the planner Directive
+   * (see briefToDirective) so it MATERIALLY steers the plan the model produces and the
+   * mission-family inference — it is NOT a cosmetic comment. It is advisory-to-planner:
+   * it does not tighten the host-level ArsenalScope egress gate (that derives solely from
+   * the target), so scope-narrowing guidance shapes the plan narrative, not the runtime gate.
+   */
+  directives?: string;
 }
 
 export interface AdmiralTurn {
@@ -238,10 +249,14 @@ export class Admiral {
 /** Map a completed brief into the Directive shape Op General consumes. */
 export function briefToDirective(brief: MissionBrief): Directive {
   const opsec: OpsecLevel = brief.fidelity === 'live' ? 'covert' : 'silent';
+  const operatorDirectives = (brief.directives || '').trim();
   return {
     objective: brief.objective || `Engagement against ${brief.target}`,
     constraints: `mission_family=${brief.family || 'unspecified'}; fidelity=${brief.fidelity}; ` +
-      (brief.fidelity === 'dry_run' ? 'DRY-RUN: plan only, no packets, no claimed findings.' : 'LIVE: authorized real packets within scope only.'),
+      (brief.fidelity === 'dry_run' ? 'DRY-RUN: plan only, no packets, no claimed findings.' : 'LIVE: authorized real packets within scope only.') +
+      // Operator guidance rides in constraints so it reaches the planner prompt and the
+      // family-inference text verbatim (buildPlanningPrompt inlines directive.constraints).
+      (operatorDirectives ? ` OPERATOR DIRECTIVES: ${operatorDirectives}` : ''),
     scopeHints: [brief.target, brief.scope].filter(Boolean).join(' — '),
     urgency: 'normal',
     opsecPreference: opsec,

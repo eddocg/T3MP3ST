@@ -1398,6 +1398,9 @@ Return only a valid JSON object wrapped in a json code block. Keep it compact, c
           total: this.currentPlan.workOrders.length,
           needsReceipt: this.currentPlan.workOrders.filter(order => order.status === 'needs_receipt').length,
           ready: this.currentPlan.workOrders.filter(order => order.status === 'ready').length,
+          // Receipt/readiness counts are ADVISORY evidence-maturity signals — they do NOT gate
+          // phase advancement or mission closure in the runtime. Describe them as guidance.
+          readinessIsAdvisory: true,
         },
       } : null,
       missionStatus: {
@@ -1426,7 +1429,7 @@ Return only a valid JSON object wrapped in a json code block. Keep it compact, c
 
     try {
       const response = await this.llm.prompt(
-        `## SITUATION REPORT REQUEST\n\nCurrent operation state:\n\`\`\`json\n${JSON.stringify(situationData, null, 2)}\n\`\`\`\n\nProduce a brief SITREP as JSON with this schema:\n\`\`\`\n{"assessment":"string","findingsSummary":"string","needsAdaptation":boolean,"adaptation":"string or null","confidence":number_0_to_100,"nextActions":["string"]}\n\`\`\`\n\nRespond with ONLY valid JSON in a code block.`,
+        `## SITUATION REPORT REQUEST\n\nCurrent operation state:\n\`\`\`json\n${JSON.stringify(situationData, null, 2)}\n\`\`\`\n\nIMPORTANT — honest language: work-order receipt/readiness counts are ADVISORY evidence-maturity signals, not hard gates. The runtime advances phases and completes the mission based on task completion, NOT on receipt/readiness. Do NOT claim the board is "blocked from closure" or that phases "cannot advance" because of missing receipts — describe them as evidence-maturity guidance (e.g. "N of M work orders still need corroborating receipts before their findings are report-ready"). Distinguish scanner observations from verified, demonstrated impact.\n\nProduce a brief SITREP as JSON with this schema:\n\`\`\`\n{"assessment":"string","findingsSummary":"string","needsAdaptation":boolean,"adaptation":"string or null","confidence":number_0_to_100,"nextActions":["string"]}\n\`\`\`\n\nRespond with ONLY valid JSON in a code block.`,
         GENERAL_REPLAN_PROMPT,
         { maxTokens: 2048, temperature: 0.3 }
       );

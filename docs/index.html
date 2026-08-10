@@ -6339,8 +6339,20 @@ tempest.operators.<span class="function">spawn</span>(<span class="string">'scan
                                 addIntel('FINDING', `[${(finding.severity || 'info').toUpperCase()}] ${finding.title}`,
                                     finding.severity === 'critical' || finding.severity === 'high' ? 'danger' : 'warning');
                                 addMissionLog?.('warning', `Finding: ${finding.title}`);
-                                // Add to frontend state
-                                addFinding?.({ severity: finding.severity || 'info', title: finding.title, target: finding.targetId || 'unknown' });
+                                // Add to frontend state. Carry the verification signals through so the
+                                // maturity ladder (observation → … → report-ready) is honest, not just
+                                // a severity chip: verifyGate/verifiedAt/provenance/evidence come from the
+                                // backend honesty gate (src/evidence/gate.ts).
+                                addFinding?.({
+                                    severity: finding.severity || 'info',
+                                    title: finding.title,
+                                    target: finding.targetId || 'unknown',
+                                    evidence: (finding.evidence && finding.evidence.length) ? `${finding.evidence.length} evidence item(s)` : '',
+                                    provenance: finding.verifyGate?.provenance || '',
+                                    verifyGate: finding.verifyGate || null,
+                                    verifiedAt: finding.verifiedAt || null,
+                                    retestStatus: finding.retestStatus || finding.status || '',
+                                });
                             }
                         } catch {}
                     });
@@ -6441,11 +6453,17 @@ tempest.operators.<span class="function">spawn</span>(<span class="string">'scan
                         try {
                             const data = JSON.parse(e.data);
                             addIntel('COMMAND', `Backend mission started: ${data.name}`, 'success');
+                            // Authoritative lifecycle transition: reconcile the War Room widgets from the
+                            // real backend status even when the War Room isn't the active page (the poll
+                            // only runs there). Re-fetches /api/mission/status internally.
+                            try { window.t3mpReconcileMissionState?.(); } catch (_) {}
                         } catch {}
                     });
 
                     this._eventSource.addEventListener('mission:stopped', () => {
                         addIntel('COMMAND', 'Backend mission stopped', 'warning');
+                        // Finalize the header/banner/chip from the authoritative status (active:false).
+                        try { window.t3mpReconcileMissionState?.(); } catch (_) {}
                     });
 
                     // ── Op Admiral SSE Events ──
@@ -15142,7 +15160,10 @@ Be brutally honest. This is not a pep talk.`;
                 phase: finding.phase || MissionContext.currentPhase || '-',
                 detail: finding.detail || '',
                 evidence: finding.evidence || '',
-                provenance: finding.provenance || ''
+                provenance: finding.provenance || '',
+                verifyGate: finding.verifyGate || null,
+                verifiedAt: finding.verifiedAt || null,
+                retestStatus: finding.retestStatus || ''
             };
             missionFindings.push(f);
             renderFindingsRow(f);
@@ -15162,6 +15183,31 @@ Be brutally honest. This is not a pep talk.`;
             }
         }
 
+        // ═══════════ EVIDENCE-MATURITY LADDER ═══════════
+        // General model (no target-specific rules): a raw scanner/tool OBSERVATION is not a proven,
+        // reportable vulnerability. Every finding is placed on a ladder from what the backend
+        // honesty gate (src/evidence/gate.ts) and retest ledger actually attest — never on the
+        // model's own severity claim. This makes it hard to confuse "a tool said X" with
+        // "an attacker capability was demonstrated."
+        //   observation      — model-asserted, no tool artifact (severity is a guess)
+        //   candidate        — has tool-grade evidence but the honesty gate did not pass
+        //   finding          — gate passed with context-level provenance
+        //   verified         — gate passed with tool provenance (verifiedAt stamped)
+        //   report-ready     — verified AND a retest passed
+        function findingMaturity(f) {
+            const prov = (f.provenance || (f.verifyGate && f.verifyGate.provenance) || 'none').toLowerCase();
+            const gatePassed = !!(f.verifyGate && f.verifyGate.passed);
+            const hasEvidence = !!(f.evidence && String(f.evidence).trim());
+            const verified = !!f.verifiedAt || (gatePassed && prov === 'tool');
+            const retestPassed = String(f.retestStatus || '').toLowerCase() === 'passed';
+            if (verified && retestPassed) return { key:'report-ready', label:'report-ready', color:'#00ff88', rgb:'0,255,136', dashed:false, tip:'Verified with tool provenance AND a passed retest — an attacker capability was demonstrated and reproduced.' };
+            if (verified) return { key:'verified', label:'verified', color:'#57d38c', rgb:'87,211,140', dashed:false, tip:'Honesty gate passed with tool provenance (verifiedAt stamped). Not yet retest-reproduced.' };
+            if (gatePassed && (prov === 'context' || hasEvidence)) return { key:'finding', label:'finding', color:'#0088ff', rgb:'0,136,255', dashed:false, tip:'Honesty gate passed with context-level provenance. Corroborate with a tool artifact + retest before reporting.' };
+            if (hasEvidence) return { key:'candidate', label:'candidate', color:'#ffaa00', rgb:'255,170,0', dashed:true, tip:'Has tool-grade evidence but the honesty gate did not confirm it. Impact not yet demonstrated.' };
+            return { key:'observation', label:'observation', color:'#999', rgb:'136,136,136', dashed:true, tip:'Model-asserted with no tool artifact / empty evidence. This is a scanner-style observation, NOT a proven vulnerability — severity is a guess.' };
+        }
+        window.findingMaturity = findingMaturity;
+
         function renderFindingsRow(f) {
             const body = document.getElementById('findingsBody');
             if (!body) return;
@@ -15175,12 +15221,10 @@ Be brutally honest. This is not a pep talk.`;
             const color = sevColors[f.severity] || '#888';
             const rgb = sevBg[f.severity] || '136,136,136';
 
-            // Model-asserted (unverified) qualifier: provenance not tool-backed, or no evidence.
-            // Tool-backed findings (provenance === 'tool' with evidence) render unchanged.
-            const isModelAsserted = (f.provenance || '').toLowerCase() !== 'tool' || !(f.evidence && String(f.evidence).trim());
-            const provBadge = isModelAsserted
-                ? `<span title="Provenance: ${escapeHtml(f.provenance || 'none')} — no tool artifact / empty evidence. Severity is model-asserted, not verified." style="margin-left: 4px; padding: 1px 5px; background: rgba(136,136,136,0.12); border: 1px dashed rgba(136,136,136,0.5); border-radius: 3px; font-size: 7px; color: #999; text-transform: uppercase; letter-spacing: 0.3px; white-space: nowrap;">model-asserted · unverified</span>`
-                : '';
+            // Maturity ladder chip — where this sits between "scanner observation" and
+            // "report-ready" per the backend honesty gate + retest ledger (not the model's claim).
+            const mat = findingMaturity(f);
+            const provBadge = `<span title="Maturity: ${escapeHtml(mat.label)} — ${escapeHtml(mat.tip)}" style="margin-left: 4px; padding: 1px 5px; background: rgba(${mat.rgb},0.12); border: 1px ${mat.dashed ? 'dashed' : 'solid'} rgba(${mat.rgb},0.5); border-radius: 3px; font-size: 7px; color: ${mat.color}; text-transform: uppercase; letter-spacing: 0.3px; white-space: nowrap;">${escapeHtml(mat.label)}</span>`;
 
             const row = document.createElement('div');
             row.className = 'finding-row';
@@ -18637,6 +18681,10 @@ IMPORTANT: This is an authorized security testing/red team platform. All operati
                 lines.push(`<div style="padding: 2px 0;"><span style="color: #888;">Complexity:</span> <span style="text-transform: uppercase;">${plan.complexity || 'unknown'}</span></div>`);
                 if (plan.roe.scope?.length) {
                     lines.push(`<div style="padding: 2px 0;"><span style="color: #888;">Scope:</span> ${plan.roe.scope.map(s => escapeHtml(s)).join(', ')}</div>`);
+                    // Honest enforcement note: the planner's scope prose is narrative. The runtime gate
+                    // authorizes by HOST (subdomains included, any scheme/port), not by exact origin — so
+                    // this text describes intent, not the byte-for-byte enforced boundary.
+                    lines.push(`<div style="padding: 2px 0;"><span style="color: #7f93a5; font-size: 10px;">Enforced by host (subdomains incl., any scheme/port) — the line above is planner intent, not the exact gate.</span></div>`);
                 }
                 roeEl.innerHTML = lines.join('');
             }
@@ -19418,6 +19466,91 @@ IMPORTANT: This is an authorized security testing/red team platform. All operati
             }
         }
 
+        // ═══════════ SINGLE MISSION-STATE AUTHORITY ═══════════
+        // Reconcile every War Room lifecycle widget from the ONE authoritative backend signal:
+        // GET /api/mission/status `.active`. The Admiral / Guided-Hunt LIVE launch brings a
+        // mission UP on the server (bringUpMissionFromPlan → cmd.start()) WITHOUT ever running
+        // the client-side startMissionFromDashboard/completeMission path — so before this
+        // reconcile the command header, fidelity banner and Op-Admiral chip froze at their
+        // initial STANDBY/PLANNING state for the whole live mission and kept stale LIVE/PLANNING
+        // indicators after it ended. Pure client-side SIMULATION missions (no backend mission)
+        // stay owned by the local flow; this takes authority only once — and for as long as —
+        // the backend actually reports a live mission (tracked by the __t3mpBackendMissionSeen latch).
+        async function t3mpReconcileMissionState(statusMaybe) {
+            let m = statusMaybe;
+            if (m === undefined) {
+                try {
+                    const base = (typeof T3MP3ST_API !== 'undefined' && T3MP3ST_API.baseUrl) || '';
+                    m = await (await fetch(base + '/api/mission/status')).json();
+                } catch (_) { return; }
+            }
+            if (!m || typeof m !== 'object') return;
+            const active = !!m.active;
+            const phase = (m.mission && m.mission.currentPhase) || null;
+            const cmdName = document.getElementById('cmdMissionName');
+            const cmdStatus = document.getElementById('cmdMissionStatus');
+            const badge = document.getElementById('generalStatusBadge');
+            const gs = document.getElementById('generalState');
+            const execBtn = document.getElementById('generalExecuteBtn');
+
+            if (active) {
+                window.__t3mpBackendMissionSeen = true;
+                window.__t3mpBackendMissionFinalized = false;
+                const nm = (m.mission && m.mission.name) || m.name || 'LIVE OPERATION';
+                if (cmdName) cmdName.textContent = nm;
+                if (cmdStatus) {
+                    cmdStatus.textContent = phase ? ('Executing — ' + String(phase).replace(/_/g, ' ')) : 'Executing';
+                    cmdStatus.style.color = '#00ff88';
+                }
+                // Assert LIVE only if the banner isn't already live, so an Admiral launch's richer
+                // target detail is not overwritten with the phase label.
+                try {
+                    const ftxt = document.getElementById('fidelityText');
+                    if (typeof setFidelity === 'function' && !(ftxt && /^LIVE/.test(ftxt.textContent || ''))) {
+                        setFidelity('live', phase ? ('phase: ' + String(phase).replace(/_/g, ' ')) : '');
+                    }
+                } catch (_) {}
+                // A running backend mission is past PLANNING — clear a stale PLANNING chip.
+                if (badge && badge.textContent === 'PLANNING') { badge.textContent = 'LIVE'; badge.style.background = '#ff4444'; }
+                if (gs && gs.textContent === 'PLANNING') { gs.textContent = 'EXECUTING'; gs.style.color = '#ff4444'; }
+                // The mission is already running: pressing EXECUTE now would tear it down and relaunch
+                // a duplicate (single-slot tempestCommand). Reflect that it is already live.
+                if (execBtn) {
+                    execBtn.disabled = true;
+                    execBtn.textContent = 'MISSION RUNNING';
+                    execBtn.style.opacity = '0.55';
+                    execBtn.style.cursor = 'not-allowed';
+                }
+                return;
+            }
+
+            // Backend reports no live mission. Finalize widgets ONLY if a backend mission was actually
+            // seen and hasn't been finalized yet — otherwise leave the header/banner to the local
+            // (simulation / dashboard) flow, which owns them when there is no backend mission.
+            if (window.__t3mpBackendMissionSeen && !window.__t3mpBackendMissionFinalized) {
+                window.__t3mpBackendMissionFinalized = true;
+                window.__t3mpBackendMissionSeen = false;
+                const priorName = cmdName ? (cmdName.textContent || '') : '';
+                const wasError = /FAILED/.test(priorName);
+                if (cmdName && !/FAILED|COMPLETE/.test(priorName)) cmdName.textContent = 'MISSION COMPLETE';
+                if (cmdStatus && !wasError) { cmdStatus.textContent = 'All phases executed'; cmdStatus.style.color = '#00ff88'; }
+                if (typeof missionTimer !== 'undefined' && missionTimer) { clearInterval(missionTimer); missionTimer = null; }
+                missionStartTime = null;
+                try { if (typeof setFidelity === 'function') setFidelity('off'); } catch (_) {}
+                // Clear a stale Admiral chip left at PLANNING/LIVE/EXECUTING after the mission ended.
+                if (badge && badge.textContent !== 'DONE') { badge.textContent = 'DONE'; badge.style.background = '#00ff88'; }
+                if (gs && /PLANNING|EXECUTING|LIVE/.test(gs.textContent || '')) { gs.textContent = 'COMPLETE'; gs.style.color = '#00ff88'; }
+                // Release the EXECUTE control from its "MISSION RUNNING" lock (a fresh plan may re-run).
+                if (execBtn && execBtn.textContent === 'MISSION RUNNING') {
+                    execBtn.disabled = false;
+                    execBtn.textContent = 'EXECUTE';
+                    execBtn.style.opacity = '1';
+                    execBtn.style.cursor = 'pointer';
+                }
+            }
+        }
+        window.t3mpReconcileMissionState = t3mpReconcileMissionState;
+
         // ═══════════ SYSTEM STATUS — live aggregate: backend · AI backbone · agents · kill-chain · findings ═══════════
         const T3MP_KILLCHAIN = ['reconnaissance','weaponization','delivery','exploitation','installation','command','actions'];
         const T3MP_PHASE_ABBR = { reconnaissance:'RECON', weaponization:'WEAP', delivery:'DLVR', exploitation:'XPLT', installation:'INST', command:'C2', actions:'ACT' };
@@ -19497,6 +19630,10 @@ IMPORTANT: This is an authorized security testing/red team platform. All operati
                 try { const m = await (await fetch(base + '/api/mission/status')).json(); phase = m.mission && m.mission.currentPhase; running = !!m.active;
                   // Resume the Elapsed timer if this tab loaded INTO an already-running mission (missionStartTime is null).
                   if (running && !missionStartTime) { missionStartTime = (m.mission && m.mission.startedAt) || Date.now(); if (!missionTimer) missionTimer = setInterval(updateMissionTimer, 1000); updateMissionTimer(); }
+                  // Single mission-state authority: reconcile the command header, fidelity banner,
+                  // Op-Admiral chip and EXECUTE button from this same authoritative poll so an Admiral/
+                  // Guided-Hunt backend launch can never leave them stuck on STANDBY/PLANNING.
+                  try { t3mpReconcileMissionState(m); } catch (_) {}
                 } catch (_) {}
                 // drive the SitRep pipeline from the poll (SSE phase/sitrep events refine it live).
                 // Set a phase-based fallback headline so a page loaded INTO a running mission still
@@ -26698,7 +26835,15 @@ Be specific and actionable. Format as structured JSON.`;
         + '<div style="font-size:11.5px;color:#8aa;margin-bottom:6px;">Depth</div><div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:16px;">'
         + DEPTHS.map(x=>'<div onclick="admiralSet(\'depth\',\''+x.id+'\')" style="'+choice(S.depth===x.id)+'"><div style="font-weight:700;color:#dde;font-size:13px;">'+x.label+'</div><div style="font-size:10px;color:#8a9;">'+x.d+'</div></div>').join('')+'</div>'
         + '<div style="font-size:11.5px;color:#8aa;margin-bottom:6px;">Autonomy</div><div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">'
-        + AUTON.map(x=>'<div onclick="admiralSet(\'autonomy\',\''+x.id+'\')" style="'+choice(S.autonomy===x.id)+'"><div style="font-weight:700;color:#dde;font-size:13px;">'+(x.id==='autonomous'?'🤖 ':'🎚 ')+x.label+'</div><div style="font-size:10px;color:#8a9;">'+x.d+'</div></div>').join('')+'</div>';
+        + AUTON.map(x=>'<div onclick="admiralSet(\'autonomy\',\''+x.id+'\')" style="'+choice(S.autonomy===x.id)+'"><div style="font-weight:700;color:#dde;font-size:13px;">'+(x.id==='autonomous'?'🤖 ':'🎚 ')+x.label+'</div><div style="font-size:10px;color:#8a9;">'+x.d+'</div></div>').join('')+'</div>'
+        // Optional operator directives — free-text guidance folded into the planner Directive
+        // (rate limits, forbidden actions, research emphasis, evidence bar, business-logic
+        // hypotheses). Materially steers the plan the model produces; it does NOT tighten the
+        // host-level scope gate (that derives from the target), so it is labeled advisory-to-planner.
+        + '<div style="margin-top:18px;padding-top:14px;border-top:1px solid rgba(255,255,255,0.07);">'
+        + '<div style="font-size:12.5px;color:#cfe;font-weight:600;margin-bottom:4px;">Operator directives <span style="color:#7f93a5;font-weight:400;">(optional)</span></div>'
+        + '<div style="font-size:10.5px;color:#7f93a5;margin-bottom:8px;line-height:1.45;">Guidance for the planner — rate limits, forbidden actions, research emphasis, evidence requirements, business-logic hypotheses (e.g. "do not physically lock/unlock without explicit confirmation"). Steers the plan; it does <b>not</b> change the enforced target scope.</div>'
+        + '<textarea id="admDirectives" oninput="window.admiralDirectivesInput&&window.admiralDirectivesInput()" placeholder="e.g. Cap requests to 2/sec. Do not attempt account takeover. Emphasize IDOR on the /orders API. Treat CORS as a finding only with a demonstrated credentialed cross-origin read." style="width:100%;box-sizing:border-box;min-height:80px;padding:10px 12px;font-size:12px;background:rgba(0,0,0,0.45);border:1px solid rgba(0,200,255,0.3);border-radius:8px;color:#e8f0f3;line-height:1.45;outline:none;resize:vertical;">'+esc(S.directives||'')+'</textarea></div>';
     } else if (S.step===4){
       h = '<div style="font-size:14px;color:#cfe;margin-bottom:12px;font-weight:700;">⚓ Brief ready</div>'
         + '<div style="display:grid;gap:7px;font-size:13px;color:#cdd;background:rgba(0,200,255,0.05);border:1px solid rgba(0,200,255,0.18);border-radius:10px;padding:14px;">'
@@ -26707,6 +26852,7 @@ Be specific and actionable. Format as structured JSON.`;
         + '<div><b style="color:#8ad">Objective:</b> '+t.obj+'</div>'
         + '<div><b style="color:#8ad">Mission family:</b> <span style="color:#9cf;">'+(_FAMILY[S.type]||'zero_day_hunt')+'</span></div>'
         + '<div><b style="color:#8ad">Depth:</b> '+S.depth+'  ·  <b style="color:#8ad">Autonomy:</b> '+(S.autonomy==='autonomous'?'🤖 autonomous (end-to-end)':'guided (per-step approval)')+'</div>'
+        + (String(S.directives||'').trim() ? '<div><b style="color:#8ad">Directives:</b> <span style="color:#cbd6db;">'+esc(S.directives.trim())+'</span> <span style="color:#7f93a5;font-size:10px;">(steers the plan, not the scope gate)</span></div>' : '')
         + '<div><b style="color:#8ad">Authorization:</b> ✅ confirmed by operator</div></div>'
         + '<div style="font-size:11px;color:#7f93a5;margin-top:10px;line-height:1.45;">⚓ <b style="color:#9cf">Launch Hunt</b> hands this brief to <b>Op Admiral</b>, which plans the operation and brings up real operators against the target. Preview the plan first to see the steps with no packets sent.</div>'
         + '<div id="admPlan" style="margin-top:12px;font-size:12px;color:#9ab;"></div>'
@@ -26762,9 +26908,12 @@ Be specific and actionable. Format as structured JSON.`;
     if(v.ok){ msg.style.color='#57d38c'; msg.textContent='✓ '+v.names.length+' header(s): '+v.names.join(', ')+' (values hidden)'; }
     else { msg.style.color='#ff8f6b'; msg.textContent='✗ '+v.error; }
   };
+  // Capture operator directives on every keystroke so a depth/autonomy click (which re-renders)
+  // never drops what the operator typed.
+  window.admiralDirectivesInput = function(){ const d=document.getElementById('admDirectives'); if(d) S.directives=d.value; };
 
   window.admiralPick = function(id){ S.type=id; render(); };
-  window.admiralSet  = function(k,v){ S[k]=v; render(); };
+  window.admiralSet  = function(k,v){ const d=document.getElementById('admDirectives'); if(d) S.directives=d.value; S[k]=v; render(); };
   window.admiralPickTarget = async function(){
     syncStep2();
     const t = TYPES.find(x=>x.id===S.type);
@@ -26794,7 +26943,7 @@ Be specific and actionable. Format as structured JSON.`;
   };
   window.admiralProceedPick = function(){ if(!window.__admLastPick) return; syncStep2(); S.target=window.__admLastPick; render(); if(window.toast) toast('⚓ Target set: '+window.__admLastPick,'success'); };
   window.openAdmiralWizard = function(){
-    S = { step:1, type:null, target:(document.getElementById('heroHuntTarget')||{}).value||'', authorized:false, depth:'standard', autonomy:(document.getElementById('heroAutonomousMode')||{}).checked?'autonomous':'guided', headers:'' };
+    S = { step:1, type:null, target:(document.getElementById('heroHuntTarget')||{}).value||'', authorized:false, depth:'standard', autonomy:(document.getElementById('heroAutonomousMode')||{}).checked?'autonomous':'guided', headers:'', directives:'' };
     window.__admExclude = []; window.__admLastPick = null;
     let o = document.getElementById('admiralWizard');
     if (!o){
@@ -26838,7 +26987,12 @@ Be specific and actionable. Format as structured JSON.`;
     const scope = 'Authorized by operator (confirmed in wizard). '
       + (sourceOnly ? 'SOURCE-ONLY static analysis + coordinated disclosure on ' : 'In-scope target: ') + S.target + '. '
       + 'Depth=' + S.depth + '; autonomy=' + S.autonomy + '.';
-    return { objective: t.obj, target: S.target, family: _FAMILY[S.type] || 'zero_day_hunt', scope: scope, fidelity: fidelity };
+    const brief = { objective: t.obj, target: S.target, family: _FAMILY[S.type] || 'zero_day_hunt', scope: scope, fidelity: fidelity };
+    // Optional operator directives ride on the brief; briefToDirective() folds them into the
+    // planner Directive.constraints so they materially steer the plan (not a cosmetic field).
+    const directives = String(S.directives||'').trim();
+    if (directives) brief.directives = directives;
+    return brief;
   }
   // The optional authenticated-target headers as a request-body fragment. Web/API only, valid only.
   // Returns { targetHeaders: {...} } to merge into the launch body, or {} when none/invalid — the

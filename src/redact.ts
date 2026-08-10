@@ -28,8 +28,45 @@ export const SECRET_PATTERNS: Record<string, { pattern: RegExp; severity: string
   api_key_field: { pattern: /api[_-]?key["\s]*[:=]["\s]*["']?[A-Za-z0-9\-_]{16,}["']?/gi, severity: 'high', provider: 'Generic' },
 };
 
+/**
+ * Runtime registry of KNOWN literal secret VALUES (per-mission authenticated target headers:
+ * bearer tokens, cookies, X-API-Key values, client secrets, session tokens, …). The pattern-based
+ * SECRET_PATTERNS above are value-BLIND — they only catch credentials that match a provider signature
+ * or sit next to a `Bearer`/`key=` marker. An opaque token that is echoed back bare (e.g. reflected in
+ * a response body, an error string, a finding description, or agent reasoning) would otherwise sail
+ * through every persistence/export/SSE boundary in the clear, because the only value-AWARE redactor
+ * (`redactConfiguredSecrets` in the arsenal) runs solely on arsenal tool RESULTS — not centrally.
+ *
+ * The mission/launch layer registers the configured header values here (via the arsenal), so that this
+ * single central boundary — which every snapshot, ledger, SSE event and report export already funnels
+ * through — scrubs the literal secret regardless of where in the artifact it appears. Values shorter
+ * than MIN_RUNTIME_SECRET_LEN are ignored to avoid catastrophically replacing a common substring.
+ */
+const runtimeSecrets = new Set<string>();
+const MIN_RUNTIME_SECRET_LEN = 6;
+
+/** Register known literal secret values so redactString/redactSecrets strip them centrally. Replaces the set. */
+export function registerRuntimeSecrets(values: Iterable<string>): void {
+  runtimeSecrets.clear();
+  for (const v of values) {
+    if (typeof v === 'string' && v.length >= MIN_RUNTIME_SECRET_LEN) runtimeSecrets.add(v);
+  }
+}
+
+/** Drop all registered runtime secret values (mission teardown / no binding). */
+export function clearRuntimeSecrets(): void {
+  runtimeSecrets.clear();
+}
+
 export function redactString(value: string): string {
   let redacted = value;
+  // Literal known-value strip FIRST (longest-first so an overlapping short value can't leave a tail
+  // of a longer one). This is the defense-in-depth layer the pattern rules below cannot provide.
+  if (runtimeSecrets.size > 0) {
+    for (const secret of [...runtimeSecrets].sort((a, b) => b.length - a.length)) {
+      if (secret) redacted = redacted.split(secret).join('[redacted]');
+    }
+  }
   for (const { pattern } of Object.values(SECRET_PATTERNS)) {
     pattern.lastIndex = 0;
     redacted = redacted.replace(pattern, '[redacted]');

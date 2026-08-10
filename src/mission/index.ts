@@ -683,8 +683,8 @@ export function createAnalysisTasks(missionId: string, targetAddress: string): T
   tasks.push({
     id: randomUUID(),
     missionId,
-    name: 'Finding Analysis & Report Generation',
-    description: `Analyze all findings from the assessment of ${targetAddress}. Validate severity ratings, identify attack chains, calculate CVSS scores, prioritize remediation recommendations, and produce a comprehensive security report.`,
+    name: 'Finding Verification & Report Synthesis',
+    description: `Verify and synthesize the findings already gathered against ${targetAddress}. Validate severity ratings against demonstrated impact (a scanner observation is NOT a proven vulnerability), identify attack chains, calculate CVSS scores, prioritize remediation, and produce the report. Any live requests here are CONFIRMATORY re-tests of existing findings within the already-authorized scope — this phase re-verifies, it does not open new discovery or broaden scope.`,
     phase: KillChainPhase.ACTIONS,
     operatorType: 'analyst',
     status: 'pending',

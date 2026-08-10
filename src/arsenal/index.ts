@@ -28,6 +28,7 @@ import type {
 } from '../types/index.js';
 import { ToolError, ToolErrorCategory } from '../types/index.js';
 import { validateToolArgs, buildJsonSchema, assertSchemaDepth } from '../validation/index.js';
+import { registerRuntimeSecrets, clearRuntimeSecrets } from '../redact.js';
 
 const dnsResolve = promisify(dns.resolve);
 const dnsResolve4 = promisify(dns.resolve4);
@@ -131,12 +132,29 @@ export function setRuntimeTargetHeaders(origin: string, headersJson: string): st
   const config = buildTargetHeaderConfig(origin, headersJson);
   if (!config) return null;
   runtimeTargetHeaderSource = { origin: config.origin, headersJson };
+  syncRedactRuntimeSecrets();
   return [...config.headers.keys()];
 }
 
 /** Clear any per-mission runtime header binding, falling back to the environment default (if any). */
 export function clearRuntimeTargetHeaders(): void {
   runtimeTargetHeaderSource = null;
+  syncRedactRuntimeSecrets();
+}
+
+/**
+ * Push the active binding's literal header VALUES into the central redactor registry so that EVERY
+ * persistence/export/SSE/ledger boundary (all of which route through redactString/redactSecrets) strips
+ * the raw secret — not just arsenal tool results via redactConfiguredSecrets. Resolves runtime-override-
+ * vs-env precedence exactly like the tool layer does. Called on bind, clear, and module load (env default).
+ */
+function syncRedactRuntimeSecrets(): void {
+  const config = parseTargetHeaderConfig();
+  if (!config) {
+    clearRuntimeSecrets();
+    return;
+  }
+  registerRuntimeSecrets([...config.headers.values()].filter(Boolean));
 }
 
 /** Parse the active exact-origin binding: an in-memory per-mission override wins over the env default. */
@@ -161,6 +179,10 @@ function targetHeadersForUrl(url: string | URL, explicit?: RequestInit['headers'
   return merged.keys().next().done ? undefined : merged;
 }
 
+// Register any environment-default target-header values with the central redactor at module load, so a
+// mission driven purely by TEMPEST_TARGET_* (no UI override) is covered before the first tool runs.
+syncRedactRuntimeSecrets();
+
 function redactConfiguredSecrets(result: ToolResult): ToolResult {
   const config = parseTargetHeaderConfig();
   const secrets = config ? [...config.headers.values()].filter(Boolean) : [];
@@ -177,6 +199,23 @@ function redactConfiguredSecrets(result: ToolResult): ToolResult {
     return value;
   };
   return redact(result) as ToolResult;
+}
+
+/**
+ * Names-only advisory for a subprocess scanner (nuclei/ffuf) that CANNOT safely carry the per-mission
+ * auth headers: passing a bearer/cookie/key on a scanner's argv would expose it in the process table
+ * (the exact leak curl_request avoids with a mode-0600 --config file). Rather than silently scan
+ * unauthenticated — which yields misleadingly "clean" results against a gated target — we surface that
+ * auth was configured for this origin but not applied, using header NAMES only (never the values).
+ * Returns '' when no configured headers match the tool's target origin (nothing to warn about).
+ */
+function unappliedAuthNote(url: string): string {
+  const names = targetHeadersForUrl(url);
+  if (!names) return '';
+  return `\n\n[WARN] Authenticated target headers are configured for this origin (${[...names.keys()].join(', ')}) `
+    + `but this scanner runs UNAUTHENTICATED — it has no argv-safe way to carry them, and putting a secret `
+    + `on the process command line is disallowed. Treat a "clean" result here as UNVERIFIED for `
+    + `authenticated surface; use curl_request/http_request for authenticated checks.`;
 }
 
 const REDIRECT_STATUS = new Set([301, 302, 303, 307, 308]);
@@ -3431,11 +3470,12 @@ export const EXTERNAL_TOOLS: CustomTool[] = [
         }
       }
 
+      const authNote = unappliedAuthNote(target);
       return {
         success: true,
-        output: findings.length > 0
+        output: (findings.length > 0
           ? `Nuclei scan of ${target}:\nFound ${findings.length} vulnerabilities:\n${findings.map(f => `  [${f.severity.toUpperCase()}] ${f.title}`).join('\n')}`
-          : `Nuclei scan of ${target}: No vulnerabilities found at severity level: ${severity}`,
+          : `Nuclei scan of ${target}: No vulnerabilities found at severity level: ${severity}`) + authNote,
         findings: findings.length > 0 ? findings : undefined,
       };
     },
@@ -3460,6 +3500,7 @@ export const EXTERNAL_TOOLS: CustomTool[] = [
       const args = ['-u', url, '-w', wordlist, '-mc', mc, '-o', '/dev/stdout', '-of', 'json', '-s'];
       const result = await runSubprocess('ffuf', args, { timeout: 120000 });
 
+      const authNote = unappliedAuthNote(url);
       try {
         const data = JSON.parse(result.stdout);
         const results = data.results || [];
@@ -3467,7 +3508,7 @@ export const EXTERNAL_TOOLS: CustomTool[] = [
           success: true,
           output: `ffuf scan of ${url}:\nFound ${results.length} results:\n${results.slice(0, 50).map((r: { input?: { FUZZ?: string }; status?: number; length?: number }) =>
             `  ${r.input?.FUZZ || '?'} -> ${r.status} (${r.length} bytes)`
-          ).join('\n')}`,
+          ).join('\n')}${authNote}`,
           findings: results.length > 0 ? [{
             title: 'Directories/Files Discovered (ffuf)',
             severity: 'info',
@@ -3475,7 +3516,7 @@ export const EXTERNAL_TOOLS: CustomTool[] = [
           }] : undefined,
         };
       } catch {
-        return { success: true, output: result.stdout || 'No results found' };
+        return { success: true, output: (result.stdout || 'No results found') + authNote };
       }
     },
   },
