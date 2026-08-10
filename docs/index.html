@@ -18147,7 +18147,7 @@ IMPORTANT: This is an authorized security testing/red team platform. All operati
         /**
          * EXECUTE PLAN — Execute the Admiral's planned operation
          */
-        async function generalExecutePlan() {
+        async function generalExecutePlan(approvalIds = []) {
             if (!generalPlanData) { toast('No plan to execute — plan first', 'error'); return; }
 
             const { apiKey, provider, model, baseUrl } = getGeneralConfig();
@@ -18213,11 +18213,25 @@ IMPORTANT: This is an authorized security testing/red team platform. All operati
                     const resp = await fetch(`${getApiBase()}/api/general/execute`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ apiKey, provider, model, ...(baseUrl ? { baseUrl } : {}) }),
+                        body: JSON.stringify({ apiKey, provider, model, approvalIds, ...(baseUrl ? { baseUrl } : {}) }),
                     });
 
                     const data = await resp.json();
                     if (!resp.ok || !data.success) {
+                        // Mission-execution approval gate: retain the pending receipt id and resume
+                        // this same EXECUTE with it once the operator approves — otherwise the retry
+                        // sends an empty body, the server's id-keyed findApproval misses the approved
+                        // receipt, and it reports "Approval required" forever. Mirrors generalFullAuto.
+                        if (resp.status === 403 && data.approval?.id) {
+                            const retryApprovalIds = [...new Set([...approvalIds, data.approval.id])];
+                            window.__t3mpPendingApprovalReceiptIds = [data.approval.id];
+                            window.__t3mpPendingApprovalRetry = () => generalExecutePlan(retryApprovalIds);
+                            addIntel('SCOPEGUARD', 'Execute receipt created — approve it in Scope Receipts to resume this operation', 'warning');
+                            toast('Approval required — approve the receipt to resume execution', 'warning');
+                            navigateTo?.('receipts');
+                            if (gs) { gs.textContent = 'AWAITING APPROVAL'; gs.style.color = '#ffaa00'; }
+                            return;
+                        }
                         throw new Error(data.error || 'Execution failed');
                     }
 
@@ -26669,7 +26683,16 @@ Be specific and actionable. Format as structured JSON.`;
         + '<div style="margin-top:18px;padding-top:14px;border-top:1px solid rgba(255,255,255,0.07);">'
         +   '<div style="font-size:11.5px;color:#7f93a5;margin-bottom:8px;">🎲 No target in mind? The Admiral will scout a <b style="color:#9cf">legal</b> one for you — a deliberately-vulnerable lab, a public CTF, or under-audited OSS for <b style="color:#9cf">source-only</b> audit + coordinated disclosure (never an arbitrary live system).</div>'
         +   '<button onclick="admiralPickTarget()" style="padding:10px 16px;font-size:12.5px;font-weight:700;background:rgba(0,136,255,0.12);border:1px solid rgba(0,136,255,0.45);border-radius:8px;color:#5bb8ff;cursor:pointer;">🛰 Let the Admiral pick a '+esc(t.label)+' target</button>'
-        +   '<div id="admPick" style="margin-top:10px;"></div></div>';
+        +   '<div id="admPick" style="margin-top:10px;"></div></div>'
+        // Web/API only: optional authenticated request headers. Values are sent to the exact target
+        // origin at LIVE execution and never rendered back or logged in the clear (see admHeaderPreview).
+        + (S.type==='web'
+          ? '<div style="margin-top:18px;padding-top:14px;border-top:1px solid rgba(255,255,255,0.07);">'
+            + '<div style="font-size:12.5px;color:#cfe;font-weight:600;margin-bottom:4px;">Request Headers <span style="color:#7f93a5;font-weight:400;">(optional)</span></div>'
+            + '<div style="font-size:10.5px;color:#7f93a5;margin-bottom:8px;line-height:1.45;">JSON object of header name → value. Applied only to the configured target origin. Sensitive values are not shown in logs.</div>'
+            + '<textarea id="admHeaders" placeholder=\'{\n  "Authorization": "Bearer &lt;token&gt;",\n  "X-API-Key": "&lt;key&gt;"\n}\' oninput="window.admiralHeadersInput()" style="width:100%;box-sizing:border-box;min-height:96px;padding:10px 12px;font-size:12px;background:rgba(0,0,0,0.45);border:1px solid rgba(0,200,255,0.3);border-radius:8px;color:#e8f0f3;font-family:\'JetBrains Mono\',monospace;outline:none;resize:vertical;">'+esc(S.headers||'')+'</textarea>'
+            + '<div id="admHeaderMsg" style="margin-top:6px;font-size:11px;min-height:15px;"></div></div>'
+          : '');
     } else if (S.step===3){
       h = '<div style="font-size:14px;color:#cfe;margin-bottom:12px;font-weight:700;">How should the Admiral run it?</div>'
         + '<div style="font-size:11.5px;color:#8aa;margin-bottom:6px;">Depth</div><div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:16px;">'
@@ -26699,10 +26722,46 @@ Be specific and actionable. Format as structured JSON.`;
   }
   function canAdvance(){
     if (S.step===1) return !!S.type;
-    if (S.step===2){ const ti=document.getElementById('admTarget'); const a=document.getElementById('admAuth'); return !!(ti&&ti.value.trim()) && !!(a&&a.checked); }
+    if (S.step===2){
+      const ti=document.getElementById('admTarget'); const a=document.getElementById('admAuth');
+      const h=document.getElementById('admHeaders');
+      const headersOk = (S.type!=='web') || admiralValidateHeaders(h ? h.value : S.headers).ok;
+      return !!(ti&&ti.value.trim()) && !!(a&&a.checked) && headersOk;
+    }
     return true;
   }
-  function syncStep2(){ const ti=document.getElementById('admTarget'); const a=document.getElementById('admAuth'); if(ti) S.target=ti.value.trim(); if(a) S.authorized=a.checked; }
+  function syncStep2(){ const ti=document.getElementById('admTarget'); const a=document.getElementById('admAuth'); const h=document.getElementById('admHeaders'); if(ti) S.target=ti.value.trim(); if(a) S.authorized=a.checked; if(h) S.headers=h.value; }
+  // Validate the optional headers JSON WITHOUT exposing values. Returns { ok, headers?, names?, error? }.
+  // A non-empty box must parse to a plain object of string→string with non-empty names; empty = ok/none.
+  function admiralValidateHeaders(raw){
+    const text = String(raw||'').trim();
+    if (!text) return { ok:true, headers:null, names:[] };
+    let parsed;
+    try { parsed = JSON.parse(text); }
+    catch(e){ return { ok:false, error:'Invalid JSON — check quotes and commas' }; }
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return { ok:false, error:'Headers must be a JSON object' };
+    const names = Object.keys(parsed);
+    if (!names.length) return { ok:false, error:'No headers in object (leave empty for none)' };
+    const FORBIDDEN = ['connection','content-length','host','proxy-authenticate','proxy-authorization','te','trailer','transfer-encoding','upgrade'];
+    for (const n of names){
+      if (!n.trim()) return { ok:false, error:'Header names cannot be empty' };
+      if (typeof parsed[n] !== 'string') return { ok:false, error:'Header "'+n+'" must have a string value' };
+      if (FORBIDDEN.indexOf(n.toLowerCase()) !== -1) return { ok:false, error:'Header "'+n+'" is a transport header and not allowed' };
+    }
+    return { ok:true, headers:parsed, names:names };
+  }
+  // Mask a value so a secret is never rendered/logged in the clear.
+  function admiralMaskHeaderValue(v){ const s=String(v); if(s.length<=8) return '[redacted]'; return s.slice(0,4)+'…[redacted]'; }
+  window.admiralHeadersInput = function(){
+    const h=document.getElementById('admHeaders'); const msg=document.getElementById('admHeaderMsg');
+    if(h) S.headers=h.value;
+    if(!msg) return;
+    const raw = h ? h.value : S.headers;
+    if(!String(raw||'').trim()){ msg.textContent=''; return; }
+    const v = admiralValidateHeaders(raw);
+    if(v.ok){ msg.style.color='#57d38c'; msg.textContent='✓ '+v.names.length+' header(s): '+v.names.join(', ')+' (values hidden)'; }
+    else { msg.style.color='#ff8f6b'; msg.textContent='✗ '+v.error; }
+  };
 
   window.admiralPick = function(id){ S.type=id; render(); };
   window.admiralSet  = function(k,v){ S[k]=v; render(); };
@@ -26735,7 +26794,7 @@ Be specific and actionable. Format as structured JSON.`;
   };
   window.admiralProceedPick = function(){ if(!window.__admLastPick) return; syncStep2(); S.target=window.__admLastPick; render(); if(window.toast) toast('⚓ Target set: '+window.__admLastPick,'success'); };
   window.openAdmiralWizard = function(){
-    S = { step:1, type:null, target:(document.getElementById('heroHuntTarget')||{}).value||'', authorized:false, depth:'standard', autonomy:(document.getElementById('heroAutonomousMode')||{}).checked?'autonomous':'guided' };
+    S = { step:1, type:null, target:(document.getElementById('heroHuntTarget')||{}).value||'', authorized:false, depth:'standard', autonomy:(document.getElementById('heroAutonomousMode')||{}).checked?'autonomous':'guided', headers:'' };
     window.__admExclude = []; window.__admLastPick = null;
     let o = document.getElementById('admiralWizard');
     if (!o){
@@ -26756,7 +26815,19 @@ Be specific and actionable. Format as structured JSON.`;
   };
   window.closeAdmiralWizard = function(){ const o=document.getElementById('admiralWizard'); if(o) o.style.display='none'; };
   window.admiralBack = function(){ if(S.step===2) syncStep2(); if(S.step>1){ S.step--; render(); } };
-  window.admiralNext = function(){ if(S.step===2) syncStep2(); if(!canAdvance()){ if(window.toast) toast(S.step===2?'Enter a target and confirm authorization':'Pick an option','warning'); return; } if(S.step<4){ S.step++; render(); } };
+  window.admiralNext = function(){
+    if(S.step===2) syncStep2();
+    if(!canAdvance()){
+      let warn = 'Pick an option';
+      if(S.step===2){
+        const hv = S.type==='web' ? admiralValidateHeaders(S.headers) : { ok:true };
+        warn = !hv.ok ? ('Request Headers: '+hv.error) : 'Enter a target and confirm authorization';
+      }
+      if(window.toast) toast(warn,'warning');
+      return;
+    }
+    if(S.step<4){ S.step++; render(); }
+  };
   // Build a COMPLETE MissionBrief from wizard state — the backend's briefToDirective() needs
   // objective/target/family/scope/fidelity (the old code sent domain/depth, which aren't brief
   // fields, so family + scope arrived empty and the plan was generated from a half-empty brief).
@@ -26768,6 +26839,14 @@ Be specific and actionable. Format as structured JSON.`;
       + (sourceOnly ? 'SOURCE-ONLY static analysis + coordinated disclosure on ' : 'In-scope target: ') + S.target + '. '
       + 'Depth=' + S.depth + '; autonomy=' + S.autonomy + '.';
     return { objective: t.obj, target: S.target, family: _FAMILY[S.type] || 'zero_day_hunt', scope: scope, fidelity: fidelity };
+  }
+  // The optional authenticated-target headers as a request-body fragment. Web/API only, valid only.
+  // Returns { targetHeaders: {...} } to merge into the launch body, or {} when none/invalid — the
+  // server re-validates and binds them exact-origin; nothing here is logged in the clear.
+  function _admHeaders(){
+    if (S.type!=='web') return {};
+    const v = admiralValidateHeaders(S.headers);
+    return (v.ok && v.headers) ? { targetHeaders: v.headers } : {};
   }
   // Resolve the LLM backbone the way missions do: a connected local agent (no key) or a configured key.
   function _admBackbone(){
@@ -26798,12 +26877,17 @@ Be specific and actionable. Format as structured JSON.`;
     try {
       // Op Admiral planning is a slow LLM call — cap it so a first-time user never gets a
       // permanent "…drafting…" spinner if the model stalls (180s).
-      const r = await fetch('/api/admiral/launch', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(Object.assign({ brief: _admBrief('dry_run'), confirmed: false }, bb)), signal: AbortSignal.timeout(180000) });
+      const r = await fetch('/api/admiral/launch', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(Object.assign({ brief: _admBrief('dry_run'), confirmed: false }, bb, _admHeaders())), signal: AbortSignal.timeout(180000) });
       const d = await r.json();
       if (d.error) throw new Error(d.error);
       const plan = d.plan || d.directive || d;
       const txt = (typeof plan === 'string') ? plan : JSON.stringify(plan, null, 2);
+      // Surface only the header NAMES the server accepted (values never come back) so the operator
+      // can confirm auth applies without exposing secrets in the preview panel.
+      const hdrNames = Array.isArray(d.authenticatedHeaderNames) ? d.authenticatedHeaderNames : [];
+      const hdrLine = hdrNames.length ? '<div style="font-size:10.5px;color:#ffcf6b;margin-bottom:5px;">🔑 Authenticated headers (values hidden): ' + esc(hdrNames.join(', ')) + '</div>' : '';
       if (el) el.innerHTML = '<div style="font-size:10.5px;color:#7bd;margin-bottom:5px;">DRY-RUN PLAN — no packets sent, no findings claimed:</div>'
+        + hdrLine
         + '<div style="background:rgba(0,0,0,0.4);border:1px solid rgba(0,136,255,0.2);border-radius:8px;padding:10px;white-space:pre-wrap;font-family:\'JetBrains Mono\',monospace;font-size:10.5px;color:#9fd;max-height:200px;overflow:auto;">' + esc(txt).slice(0, 1800) + '</div>';
     } catch(e) {
       const timedOut = (e && (e.name === 'TimeoutError' || e.name === 'AbortError'));
@@ -26847,7 +26931,10 @@ Be specific and actionable. Format as structured JSON.`;
       ? getApiBase()
       : ((typeof T3MP3ST_API !== 'undefined' && T3MP3ST_API.baseUrl) || '');
     const admiralFetch = function(path, opts){ return fetch(admiralApiBase + path, opts); };
-    const body = function(extra){ return JSON.stringify(Object.assign({ brief: brief, confirmed: true }, bb, extra || {})); };
+    // _admHeaders() rides on every launch AND every approved-retry so the server can re-bind the
+    // authenticated-target headers when the mission actually starts (the block-for-approval path
+    // clears them). Web/API only; values are re-validated + exact-origin bound server-side.
+    const body = function(extra){ return JSON.stringify(Object.assign({ brief: brief, confirmed: true }, bb, _admHeaders(), extra || {})); };
     // Op Admiral planning is a slow LLM call, and on success the SERVER brings up a LIVE
     // mission. The server budgets up to 300s for planning, so the client cap MUST exceed that
     // (330s) — otherwise the fetch aborts mid-plan while the server keeps going and may launch

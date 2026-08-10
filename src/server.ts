@@ -30,6 +30,7 @@ import { AGENT_PROMPT_PACKS, FOREFRONT_PRESSURE_LANES, OPERATOR_RUNBOOKS, RESOUR
 import { AI_REDTEAM_PLAYBOOK, AI_REDTEAM_TECHNIQUE_IDS, aiRedTeamBriefing } from './resources/ai-redteam-playbook.js';
 import { OPERATOR_SYSTEM_PROMPTS, PLINIAN_OPERATOR_DOCTRINE, THE_FIXER_SYSTEM_PROMPT } from './prompts/index.js';
 import { createTargetFromUrl, createTargetFromIP } from './target/index.js';
+import { setRuntimeTargetHeaders, clearRuntimeTargetHeaders } from './arsenal/index.js';
 import type { OperatorArchetype, LLMProvider } from './types/index.js';
 import { listOperatorPrompts, setOperatorOverride, resetOperatorOverride, type OperatorOverride } from './operators/index.js';
 import { ingestRepoToSourceContext, runWhiteboxAnalysis, resolveRepoSourceForAnalysis, RepoCloneError, RepoPathError } from './recon/whitebox.js';
@@ -1330,6 +1331,35 @@ function blockForApproval(res: Response, guard: { allowed: false; approval: Appr
     approval: guard.approval,
     next: `POST /api/approvals/${guard.approval.id}/approve`,
   });
+}
+
+/**
+ * Bind optional per-mission authenticated-target headers supplied through the launch/execute request
+ * body onto the arsenal's runtime header slot, scoped to the exact origin of `target`. The values only
+ * apply to that one origin and are stripped across cross-origin redirects (enforced in arsenal). Returns
+ * the redaction-safe list of header NAMES accepted (never the values) so callers can log/plan with them;
+ * returns [] when no headers were supplied and null when they were supplied but rejected (fail closed).
+ * Only http(s) targets carry headers; anything else clears the slot. Never mutates process.env.
+ */
+function bindMissionTargetHeaders(body: Record<string, unknown>, target: string): string[] | null {
+  const raw = (body as { targetHeaders?: unknown }).targetHeaders;
+  if (raw === undefined || raw === null || raw === '') { clearRuntimeTargetHeaders(); return []; }
+
+  let origin: string;
+  try {
+    const url = new URL(target.includes('://') ? target : `https://${target}`);
+    if (!['http:', 'https:'].includes(url.protocol)) { clearRuntimeTargetHeaders(); return []; }
+    origin = url.origin;
+  } catch {
+    clearRuntimeTargetHeaders();
+    return null;
+  }
+
+  // Accept either a pre-stringified JSON object or an actual object; setRuntimeTargetHeaders re-validates.
+  const headersJson = typeof raw === 'string' ? raw : JSON.stringify(raw);
+  const names = setRuntimeTargetHeaders(origin, headersJson);
+  if (!names) { clearRuntimeTargetHeaders(); return null; }
+  return names;
 }
 
 function routeFamilyForDraft(draft: MissionDraft): MissionFamily {
@@ -7223,7 +7253,20 @@ app.post('/api/general/execute', async (req: Request, res: Response): Promise<vo
     }
     for (const target of execConfig.targets) {
       const guard = guardAction(req.body as Record<string, unknown>, 'mission_execution', target, `Execute General plan ${plan.codename} against ${target}`);
-      if (!guard.allowed) { blockForApproval(res, guard); return; }
+      if (!guard.allowed) { clearRuntimeTargetHeaders(); blockForApproval(res, guard); return; }
+    }
+
+    // Optional per-mission authenticated-target headers, bound to the plan's primary http(s) target
+    // origin (exact-origin only — enforced in the arsenal layer, stripped across cross-origin redirects).
+    // Validated up front: a malformed map fails the whole execute before any operator spawns.
+    const headerTarget = execConfig.targets.find(t => /^https?:\/\//.test(t)) || execConfig.targets[0] || '';
+    const execHeaderNames = bindMissionTargetHeaders(req.body as Record<string, unknown>, headerTarget);
+    if (execHeaderNames === null) {
+      res.status(400).json({ error: 'targetHeaders must be a JSON object of string header names to string values, applied to an http(s) target' });
+      return;
+    }
+    if (execHeaderNames.length) {
+      broadcastEvent('general:target_headers', { origin: hostFromTarget(headerTarget), headerNames: execHeaderNames });
     }
 
     // Create TempestCommand instance from the plan
@@ -7289,6 +7332,7 @@ app.post('/api/general/execute', async (req: Request, res: Response): Promise<vo
       missionGate: execConfig.missionGate,
       review: execConfig.review,
       opsecLevel: execConfig.opsecLevel,
+      authenticatedHeaderNames: execHeaderNames,
       status: cmd.getStatus(),
     });
   } catch (error: any) {
@@ -7647,7 +7691,23 @@ app.post('/api/admiral/launch', async (req: Request, res: Response): Promise<voi
     const directive = briefToDirective(brief);
     const live = brief.fidelity === 'live';
 
+    // Optional per-mission authenticated-target headers. Validate BEFORE any planning/launch so a
+    // malformed map is rejected up front (fail closed) and never reaches a mission. On success we
+    // learn only the header NAMES (secret values stay in the arsenal layer) and feed those names to
+    // the planner so a dry-run can reason about auth without exposing values.
+    const headerNames = bindMissionTargetHeaders(req.body as Record<string, unknown>, brief.target);
+    if (headerNames === null) {
+      res.status(400).json({ error: 'targetHeaders must be a JSON object of string header names to string values, applied to an http(s) target' });
+      return;
+    }
+    if (headerNames.length) {
+      directive.scopeHints = [directive.scopeHints, `Authenticated target headers supplied (names only, values redacted): ${headerNames.join(', ')}`].filter(Boolean).join(' — ');
+    }
+
     if (live && !confirmed) {
+      // Preview/authorization gate reached without a live confirmation — no mission runs, so don't
+      // leave a header binding armed on the shared runtime slot.
+      clearRuntimeTargetHeaders();
       res.status(409).json({ error: 'LIVE launch requires confirmed=true (authorization gate)', directive });
       return;
     }
@@ -7664,7 +7724,9 @@ app.post('/api/admiral/launch', async (req: Request, res: Response): Promise<voi
     if (live) {
       const guard = guardAction(req.body as Record<string, unknown>, 'autonomous_execution', brief.target,
         `Admiral LIVE launch: ${brief.objective}`);
-      if (!guard.allowed) { blockForApproval(res, guard); return; }
+      // Approval still pending — nothing launches yet, so don't leave headers armed; the approved
+      // retry carries targetHeaders again and re-binds them.
+      if (!guard.allowed) { clearRuntimeTargetHeaders(); blockForApproval(res, guard); return; }
     }
 
     const generalLLM = new LLMBackbone(generalConfig);
@@ -7680,8 +7742,10 @@ app.post('/api/admiral/launch', async (req: Request, res: Response): Promise<voi
     const plan = await activeGeneral.planOperation(directive);
 
     if (!live) {
-      // DRY-RUN: plan only, no mission, no packets, no claimed findings.
-      res.json({ mode: 'dry_run', plan, directive, note: 'Plan only — no packets sent, no findings claimed.' });
+      // DRY-RUN: plan only, no mission, no packets, no claimed findings. Don't arm headers for a
+      // preview; report only the safe header NAMES so the operator can confirm what will be sent.
+      clearRuntimeTargetHeaders();
+      res.json({ mode: 'dry_run', plan, directive, authenticatedHeaderNames: headerNames, note: 'Plan only — no packets sent, no findings claimed.' });
       return;
     }
 
@@ -7709,10 +7773,15 @@ app.post('/api/admiral/launch', async (req: Request, res: Response): Promise<voi
       });
       return;
     }
+    if (headerNames.length) {
+      // Names only — never the values (those stay inside the arsenal layer and are redacted from output).
+      broadcastEvent('admiral:target_headers', { origin: hostFromTarget(brief.target), headerNames });
+    }
     const broughtUp = bringUpMissionFromPlan(execConfig, generalConfig);
     res.json({
       mode: 'live', plan, review: execConfig.review,
       operators: broughtUp.spawnedOps, status: broughtUp.status, sse: '/api/events',
+      authenticatedHeaderNames: headerNames,
       note: broughtUp.spawnedOps.length
         ? `Mission LIVE — ${broughtUp.spawnedOps.length} operator(s) running. Follow /api/events.`
         : 'Plan produced no operators to spawn — nothing is running.',

@@ -130,6 +130,26 @@ describe('local API authorization hardening invariants', () => {
     expect(uiSource).toMatch(/__t3mpPendingApprovalReceiptIds\?\.includes\(id\)/);
   });
 
+  it('Op General EXECUTE resumes with the approved mission_execution receipt instead of minting another', () => {
+    const start = uiSource.indexOf('async function generalExecutePlan(');
+    const end = uiSource.indexOf('async function generalFullAuto(', start);
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+    const execute = uiSource.slice(start, end);
+
+    // Takes seed ids and sends them to /api/general/execute (empty body would miss the
+    // server's id-keyed findApproval and re-mint a duplicate mission_execution receipt).
+    expect(execute).toMatch(/async function generalExecutePlan\(approvalIds = \[\]\)/);
+    expect(execute).toMatch(/body: JSON\.stringify\(\{ apiKey, provider, model, approvalIds,/);
+    // 403 branch retains the receipt id and registers a resume that re-runs EXECUTE with it.
+    expect(execute).toMatch(/resp\.status === 403 && data\.approval\?\.id/);
+    expect(execute).toMatch(/retryApprovalIds = \[\.\.\.new Set\(\[\.\.\.approvalIds, data\.approval\.id\]\)\]/);
+    expect(execute).toMatch(/__t3mpPendingApprovalReceiptIds = \[data\.approval\.id\]/);
+    expect(execute).toMatch(/__t3mpPendingApprovalRetry = \(\) => generalExecutePlan\(retryApprovalIds\)/);
+    // Guard against the empty-body regression this fix removes.
+    expect(execute).not.toMatch(/body: JSON\.stringify\(\{ apiKey, provider, model, \.\.\.\(baseUrl/);
+  });
+
   it('Admiral manual approve-then-resume threads the approved receipt id back instead of minting a duplicate', () => {
     const start = uiSource.indexOf('window.admiralLaunch = async function');
     const end = uiSource.indexOf('})();', start);

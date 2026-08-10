@@ -82,21 +82,30 @@ const FORBIDDEN_TARGET_HEADERS = new Set([
   'te', 'trailer', 'transfer-encoding', 'upgrade',
 ]);
 
-/** Parse an exact-origin binding and its default headers. Invalid configuration fails closed. */
-function parseTargetHeaderConfig(): TargetHeaderConfig | null {
-  const rawOrigin = process.env.TEMPEST_TARGET_ORIGIN?.trim();
-  const rawHeaders = process.env.TEMPEST_TARGET_HEADERS?.trim();
-  if (!rawOrigin || !rawHeaders) return null;
+// In-memory, per-run override for a single authenticated target origin. Set by the mission/launch
+// layer from per-mission UI headers so the exact same exact-origin binding, cross-origin redirect
+// stripping, and output redaction that back the TEMPEST_TARGET_* env vars apply to UI-supplied
+// headers WITHOUT (a) mutating process.env from a request handler or (b) touching the on-disk state
+// snapshot (buildStateSnapshot never serializes this). PRECEDENCE: an explicit runtime override wins
+// over the server-environment default — the operator running this specific mission is more specific
+// than a process-launch default. Cleared when the mission tears down / a new one binds.
+let runtimeTargetHeaderSource: { origin: string; headersJson: string } | null = null;
+
+/** Build a validated exact-origin header binding from a raw origin + JSON header map. Fails closed. */
+function buildTargetHeaderConfig(rawOrigin?: string, rawHeaders?: string): TargetHeaderConfig | null {
+  const origin = rawOrigin?.trim();
+  const headersRaw = rawHeaders?.trim();
+  if (!origin || !headersRaw) return null;
 
   try {
-    const target = new URL(rawOrigin);
+    const target = new URL(origin);
     if (!['http:', 'https:'].includes(target.protocol)
       || target.username || target.password
       || target.pathname !== '/' || target.search || target.hash) {
       return null;
     }
 
-    const parsed: unknown = JSON.parse(rawHeaders);
+    const parsed: unknown = JSON.parse(headersRaw);
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
 
     const headers = new Headers();
@@ -108,6 +117,33 @@ function parseTargetHeaderConfig(): TargetHeaderConfig | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * Bind per-mission authenticated-target headers for this process run. Returns the redaction-safe list
+ * of header NAMES that were accepted (values are never returned or logged), or null if the config was
+ * rejected (malformed JSON, non-string value, forbidden transport header, or bad origin) — fail closed.
+ * The caller can surface the names (e.g. "Authenticated target headers supplied: Authorization, X-API-Key")
+ * without exposing any secret value.
+ */
+export function setRuntimeTargetHeaders(origin: string, headersJson: string): string[] | null {
+  const config = buildTargetHeaderConfig(origin, headersJson);
+  if (!config) return null;
+  runtimeTargetHeaderSource = { origin: config.origin, headersJson };
+  return [...config.headers.keys()];
+}
+
+/** Clear any per-mission runtime header binding, falling back to the environment default (if any). */
+export function clearRuntimeTargetHeaders(): void {
+  runtimeTargetHeaderSource = null;
+}
+
+/** Parse the active exact-origin binding: an in-memory per-mission override wins over the env default. */
+function parseTargetHeaderConfig(): TargetHeaderConfig | null {
+  if (runtimeTargetHeaderSource) {
+    return buildTargetHeaderConfig(runtimeTargetHeaderSource.origin, runtimeTargetHeaderSource.headersJson);
+  }
+  return buildTargetHeaderConfig(process.env.TEMPEST_TARGET_ORIGIN, process.env.TEMPEST_TARGET_HEADERS);
 }
 
 function targetHeadersForUrl(url: string | URL, explicit?: RequestInit['headers']): Headers | undefined {
