@@ -503,50 +503,80 @@ describe('Wedged-dispatch timeout backstop', () => {
   });
 
   it('a wedged mission stalls instead of advancing after required recon dispatches time out', async () => {
-    // Tiny backstop so the test is fast and deterministic.
-    const prev = process.env.T3MP3ST_TASK_TIMEOUT_MS;
-    process.env.T3MP3ST_TASK_TIMEOUT_MS = '30';
-    try {
-      // Re-import with the env override in place so resolveTaskTimeoutMs() reads it.
-      const mod = await import('../index.js');
-      const command = new mod.TempestCommand({
-        name: 'Wedge Op',
-        llm: { provider: 'mock', model: 'mock-model' },
-      });
+    // DETERMINISTIC (no wall-clock race): the consolidated timeout model clamps the env override
+    // (T3MP3ST_TASK_TIMEOUT_MS=30) up to the dispatchTimeoutMs floor (60000ms), so driving the real
+    // tick loop against wall-clock can never reap the wedge within a fast test window. Instead we
+    // wedge EVERY required recon dispatch (all hang, none settle), force each start time into the
+    // past, and invoke the backstop directly — exactly the reaping the 1s tick performs. The queue
+    // drains to all-terminal-with-failures, which is the genuine stall precondition.
+    const mod = await import('../index.js');
+    const command = new mod.TempestCommand({
+      name: 'Wedge Op',
+      llm: { provider: 'mock', model: 'mock-model' },
+    }) as any;
 
-      // A target + a recon operator whose agent loop wedges forever.
-      command.targetEnv.addTarget({ name: 'example.com', address: 'example.com', type: 'web_application', zone: 'external' });
-      const op = command.spawnOperator('Recon-Wedge', 'recon');
-      op.attachArsenal(command.arsenal, makeWedgingLoop());
+    command.targetEnv.addTarget({ name: 'example.com', address: 'example.com', type: 'web_application', zone: 'external' });
+    const op = command.spawnOperator('Recon-Wedge', 'recon');
+    op.attachArsenal(command.arsenal, makeWedgingLoop());
 
-      let phaseAdvanced = false;
-      command.on('mission:phase_changed', () => { phaseAdvanced = true; });
+    let phaseAdvanced = false;
+    command.on('mission:phase_changed', () => { phaseAdvanced = true; });
 
-      command.start();
+    command.start();
+    const mission = command.mission.getActiveMission();
+    expect(mission).toBeDefined();
+    const taskQueue = command.mission.getTaskQueue();
 
-      // Poll (real timers): the 1s tick loop must dispatch, wedge, then reap the
-      // dispatch via the backstop. Failed required recon work should stall instead
-      // of advancing the mission with no successful backend/model work.
-      const deadline = Date.now() + 8000;
-      while (Date.now() < deadline && !command.getStatus().paused) {
-        await new Promise(r => setTimeout(r, 100));
-      }
-      const status = command.getStatus();
-      command.stop();
+    // Seed the recon phase, then wedge EVERY task in the current phase (all hang forever).
+    command.mission.generateTasksForTarget('example.com');
+    const reconTasks = taskQueue.getForMission(mission.id)
+      .filter((t: any) => t.phase === mission.currentPhase);
+    expect(reconTasks.length).toBeGreaterThan(0);
 
-      expect(phaseAdvanced).toBe(false);
-      expect(status.paused).toBe(true);
-      expect(status.stallReason).toContain('stalled in reconnaissance');
-      // The wedged operator was reset back to idle (or re-tasked in a later phase),
-      // never left stuck in 'executing' with no current task.
-      const stuck = command.cell.getAllOperators().some(
-        o => (o.status === 'executing' || o.status === 'tasked') && !o.state.currentTask
-      );
-      expect(stuck).toBe(false);
-    } finally {
-      if (prev === undefined) delete process.env.T3MP3ST_TASK_TIMEOUT_MS;
-      else process.env.T3MP3ST_TASK_TIMEOUT_MS = prev;
+    for (const t of reconTasks) {
+      command.activeDispatches.add(t.id);
+      command.dispatchOperators.set(t.id, op);
+      taskQueue.assign(t.id, op.id);
+      taskQueue.beginAttempt(t.id);
+      // Only the first assignTask wedges (the operator becomes busy); the rest throw "not available"
+      // synchronously — swallow those rejections since the backstop marks every task timed-out anyway.
+      void Promise.resolve(op.assignTask(t, command.targetEnv.getAllTargets()[0])).catch(() => { /* wedge */ });
+      // Force the dispatch's wall-clock start far past any timeout floor.
+      command.dispatchStartTimes.set(t.id, Date.now() - (24 * 60 * 60 * 1000)); // 1 day ago
     }
+
+    // Run the backstop once — deterministic reaping of every wedged dispatch (no env/floor race).
+    command.checkDispatchTimeouts(taskQueue);
+
+    // Every required recon task is now terminal-failed; none pending or in flight.
+    const all = taskQueue.getForMission(mission.id);
+    expect(all.filter((t: any) => ['pending', 'assigned', 'in_progress'].includes(t.status))).toHaveLength(0);
+    expect(command.activeDispatches.size).toBe(0);
+    expect(all.some((t: any) => t.status === 'failed')).toBe(true);
+
+    // Evaluate phase advancement: with all tasks terminal and required failures, the mission stalls.
+    await command.tick();
+
+    const status = command.getStatus();
+
+    // INVARIANT: genuinely timed-out, unresolved required work stalls the mission.
+    expect(phaseAdvanced).toBe(false);                       // phase must NOT advance
+    expect(status.paused).toBe(true);                        // blocking stall -> paused
+    expect(command.getRunState()).toBe('stalled');           // API/UI state is 'stalled', never 'running'
+    expect(status.stallReason).toContain('stalled in reconnaissance');
+
+    // Recovery must require reconciliation/retry — a stalled mission does not silently resume.
+    const outcome = command.recoverMission();
+    expect(outcome.resumed).toBe(false);                     // blockers remain -> no silent resume
+    expect(outcome.blocking.length).toBeGreaterThan(0);
+    expect(command.getStatus().paused).toBe(true);           // still stalled after refused resume
+    command.stop();
+
+    // The wedged operator was reset back to idle, never left stuck 'executing' with no task.
+    const stuck = command.cell.getAllOperators().some(
+      (o: any) => (o.status === 'executing' || o.status === 'tasked') && !o.state.currentTask
+    );
+    expect(stuck).toBe(false);
   }, 15000);
 });
 
