@@ -6351,6 +6351,8 @@ tempest.operators.<span class="function">spawn</span>(<span class="string">'scan
                                     provenance: finding.verifyGate?.provenance || '',
                                     verifyGate: finding.verifyGate || null,
                                     verifiedAt: finding.verifiedAt || null,
+                                    claimSupport: finding.claimSupport || null,
+                                    category: finding.category || '',
                                     retestStatus: finding.retestStatus || finding.status || '',
                                 });
                             }
@@ -8484,6 +8486,10 @@ o.id === 'coordinator' ? `1. MISSION_STATUS: Progress assessment
                         ${kv('Target', f.target)}
                         ${kv('Phase', f.phase)}
                         ${kv('Provenance', (f.provenance || 'none') + (modelAsserted ? ' · model-asserted (unverified)' : ' · tool-backed'))}
+                        ${f.category ? kv('Category', f.category) : ''}
+                        ${(f.claimSupport && f.claimSupport.supportLevel) ? kv('Evidence Support', `${f.claimSupport.supportLevel}${f.claimSupport.supportLevel !== 'supported' ? ` — ${f.claimSupport.rationale}` : ' (evidence supports the claim)'}`) : ''}
+                        ${(f.claimSupport && f.claimSupport.supportLevel === 'unsupported') ? kv('Audited Severity', `capped at ${(f.claimSupport.severityCap || 'low').toUpperCase()} (claimed ${(f.severity||'info').toUpperCase()})`) : ''}
+                        ${(f.authContextApplied === true) ? kv('Auth Context', 'credential headers applied (≠ authz succeeded)') : ''}
                         ${f.timestamp ? kv('Time', f.timestamp) : ''}
                     </div>
                     ${f.detail ? `<div style="color:#666;margin-bottom:3px;text-transform:uppercase;font-size:9px;letter-spacing:0.5px;">Detail</div><div style="color:#ddd;white-space:pre-wrap;word-break:break-word;margin-bottom:12px;padding:8px;background:rgba(0,0,0,0.3);border-radius:4px;border-left:2px solid ${color};">${escapeHtml(String(f.detail))}</div>` : ''}
@@ -15163,6 +15169,8 @@ Be brutally honest. This is not a pep talk.`;
                 provenance: finding.provenance || '',
                 verifyGate: finding.verifyGate || null,
                 verifiedAt: finding.verifiedAt || null,
+                claimSupport: finding.claimSupport || null,
+                category: finding.category || '',
                 retestStatus: finding.retestStatus || ''
             };
             missionFindings.push(f);
@@ -15198,10 +15206,19 @@ Be brutally honest. This is not a pep talk.`;
             const prov = (f.provenance || (f.verifyGate && f.verifyGate.provenance) || 'none').toLowerCase();
             const gatePassed = !!(f.verifyGate && f.verifyGate.passed);
             const hasEvidence = !!(f.evidence && String(f.evidence).trim());
-            const verified = !!f.verifiedAt || (gatePassed && prov === 'tool');
+            // capabilityVerified = tool-proven AND the evidence supports the asserted category.
+            // verifiedAt is only stamped when the gate judged the capability demonstrated.
+            const capabilityVerified = !!f.verifiedAt;
+            const toolProven = gatePassed && prov === 'tool';
+            const support = (f.claimSupport && f.claimSupport.supportLevel) || null;
+            // verified = capabilityVerified: tool-proven AND evidence supports the category
+            // (verifiedAt is only stamped then). Distinct from mere tool provenance below.
+            const verified = capabilityVerified;
             const retestPassed = String(f.retestStatus || '').toLowerCase() === 'passed';
-            if (verified && retestPassed) return { key:'report-ready', label:'report-ready', color:'#00ff88', rgb:'0,255,136', dashed:false, tip:'Verified with tool provenance AND a passed retest — an attacker capability was demonstrated and reproduced.' };
-            if (verified) return { key:'verified', label:'verified', color:'#57d38c', rgb:'87,211,140', dashed:false, tip:'Honesty gate passed with tool provenance (verifiedAt stamped). Not yet retest-reproduced.' };
+            if (verified && retestPassed) return { key:'report-ready', label:'report-ready', color:'#00ff88', rgb:'0,255,136', dashed:false, tip:'Tool-proven AND evidence supports the claimed category AND a retest reproduced it — a demonstrated, reproducible attacker capability.' };
+            if (verified) return { key:'verified', label:'verified', color:'#57d38c', rgb:'87,211,140', dashed:false, tip:'Demonstrated capability: tool provenance AND the evidence supports the claimed category (verifiedAt stamped). Not yet retest-reproduced.' };
+            if (toolProven && support === 'unsupported') return { key:'tool-proven', label:'tool-proven', color:'#57a8d3', rgb:'87,168,211', dashed:false, tip:'Real tool output is attached (provenance), but it does NOT demonstrate the claimed category — e.g. a scanner observation, not a proven vulnerability. Severity capped.' };
+            if (toolProven) return { key:'tool-proven', label:'tool-proven', color:'#57a8d3', rgb:'87,168,211', dashed:false, tip:'Backed by real tool output (provenance). NOT the same as a demonstrated attacker capability — that requires evidence-supported category + retest.' };
             if (gatePassed && (prov === 'context' || hasEvidence)) return { key:'finding', label:'finding', color:'#0088ff', rgb:'0,136,255', dashed:false, tip:'Honesty gate passed with context-level provenance. Corroborate with a tool artifact + retest before reporting.' };
             if (hasEvidence) return { key:'candidate', label:'candidate', color:'#ffaa00', rgb:'255,170,0', dashed:true, tip:'Has tool-grade evidence but the honesty gate did not confirm it. Impact not yet demonstrated.' };
             return { key:'observation', label:'observation', color:'#999', rgb:'136,136,136', dashed:true, tip:'Model-asserted with no tool artifact / empty evidence. This is a scanner-style observation, NOT a proven vulnerability — severity is a guess.' };

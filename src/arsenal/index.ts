@@ -179,6 +179,21 @@ function targetHeadersForUrl(url: string | URL, explicit?: RequestInit['headers'
   return merged.keys().next().done ? undefined : merged;
 }
 
+/**
+ * PROVENANCE probe: were configured target credential/headers actually attached for this URL's
+ * origin? Returns true ONLY when a configured header set matches the origin (i.e. the request that
+ * produced a finding ran with credential headers applied). Means "credentials were attached", NOT
+ * that authentication or authorization succeeded. Never exposes header names or values.
+ */
+export function credentialHeadersAppliedFor(url: string | URL): boolean {
+  try {
+    const config = parseTargetHeaderConfig();
+    return !!config && new URL(url).origin === config.origin && [...config.headers.keys()].length > 0;
+  } catch {
+    return false;
+  }
+}
+
 // Register any environment-default target-header values with the central redactor at module load, so a
 // mission driven purely by TEMPEST_TARGET_* (no UI override) is covered before the first tool runs.
 syncRedactRuntimeSecrets();
@@ -2492,11 +2507,17 @@ ${issues.length ? `Issues:\n${issues.join('\n')}` : '✓ No obvious issues'}`,
             title: 'API Endpoints Discovered',
             severity: 'info' as const,
             details: `Found ${apiEndpoints.length} API endpoints: ${apiEndpoints.map(e => e.path).join(', ')}`,
+            category: 'info_disclosure',
+            observationClass: 'observation' as const,
+            authContextApplied: credentialHeadersAppliedFor(baseUrl),
           }] : []),
           ...(docEndpoints.length > 0 ? [{
             title: 'API Documentation Exposed',
             severity: 'low' as const,
             details: `API documentation accessible at: ${docEndpoints.map(e => e.path).join(', ')}`,
+            category: 'info_disclosure',
+            observationClass: 'observation' as const,
+            authContextApplied: credentialHeadersAppliedFor(baseUrl),
           }] : []),
         ] : undefined,
       };
@@ -2577,8 +2598,11 @@ ${issues.length ? `Issues:\n${issues.join('\n')}` : '✓ No obvious issues'}`,
         output: sections.join('\n'),
         findings: dangerousMethods.length > 0 ? [{
           title: 'Dangerous HTTP Methods Enabled',
-          severity: 'medium' as const,
-          details: `The following potentially dangerous HTTP methods are enabled: ${dangerousMethods.join(', ')}. TRACE can enable XST attacks, PUT/DELETE may allow unauthorized modifications.`,
+          severity: 'low' as const,
+          details: `The following potentially dangerous HTTP methods are enabled: ${dangerousMethods.join(', ')}. This is a hardening OBSERVATION — no unauthorized execution was demonstrated. TRACE can enable XST, PUT/DELETE may allow modification, only IF an authorization boundary actually fails (not tested here).`,
+          category: 'info_disclosure',
+          observationClass: 'observation' as const,
+          authContextApplied: credentialHeadersAppliedFor(url),
         }] : undefined,
       };
     },
@@ -2673,8 +2697,15 @@ ${issues.length ? `Issues:\n${issues.join('\n')}` : '✓ No obvious issues'}`,
         output: `CORS Configuration Check for ${url}:\n${output}`,
         findings: vulnerabilities.length > 0 ? [{
           title: 'CORS Misconfiguration',
-          severity: vulnerabilities.some(v => v.includes('CRITICAL')) ? 'critical' as const : 'high' as const,
+          // CORS reflection is a CONFIGURATION OBSERVATION until authenticated sensitive
+          // cross-origin impact is demonstrated. Header reflection alone is not a demonstrated
+          // credential/data-theft capability, so severity stays bounded (low/medium) and the
+          // category stays 'cors' — the evidence-vs-claim gate keeps it from inflating further.
+          severity: vulnerabilities.some(v => v.includes('WITH credentials') || v.includes('Wildcard ACAO with credentials')) ? 'medium' as const : 'low' as const,
           details: vulnerabilities.join('; '),
+          category: 'cors',
+          observationClass: 'observation',
+          authContextApplied: credentialHeadersAppliedFor(url),
         }] : undefined,
       };
     },

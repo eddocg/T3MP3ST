@@ -13,6 +13,7 @@
  */
 
 import type { Finding } from '../types/index.js';
+import { assessClaimSupport, CATEGORY_OBSERVATION } from './classification.js';
 
 /** Evidence types that represent real machine/tool output (vs a human note). */
 const TOOL_EVIDENCE = new Set(['output', 'command', 'response', 'request', 'log', 'file']);
@@ -24,11 +25,25 @@ export interface LiveGateResult {
   provenance: LiveProvenance;
   reasons: string[];
   checkedAt: number;
+  /** Deterministic evidence-vs-claim verdict — separate axis from provenance. */
+  support: ReturnType<typeof assessClaimSupport>;
+  /**
+   * TRUE only when the finding is BOTH tool-proven AND its asserted category is supported by that
+   * evidence (and is not an inherently observation-only category). This is the bar for calling a
+   * finding a demonstrated capability. `passed` alone means only "has tool provenance".
+   */
+  capabilityVerified: boolean;
 }
 
 /**
  * Gate a live finding. PASS only when the claim is backed by real tool output.
  * Honest by construction: it never invents provenance, and it states WHY it blocked.
+ *
+ * Two independent honesty axes are now enforced:
+ *   1. PROVENANCE — is there real tool output attached? (the original gate)
+ *   2. SUPPORT    — does that evidence actually demonstrate the asserted category? (new)
+ * A "CRITICAL rce" whose only evidence is a cleartext-HTTP observation now fails support even when
+ * it passes provenance, so it is NOT stamped verified and its severity is capped by the audit.
  */
 export function gateLiveFinding(f: Finding): LiveGateResult {
   const reasons: string[] = [];
@@ -42,6 +57,22 @@ export function gateLiveFinding(f: Finding): LiveGateResult {
     reasons.push(`${f.severity} severity asserted with zero evidence — severity must be backed by evidence`);
   }
 
+  // Axis 2 — evidence-vs-claim support. SEPARATE verdict from provenance; attached to the finding
+  // for the operator and surfaced via `support`/`capabilityVerified`, NOT folded into `passed`
+  // (which stays a pure provenance signal). The support rationale is recorded in `reasons` for
+  // visibility but does not by itself fail provenance when tool output exists.
+  const support = assessClaimSupport(f);
+  f.claimSupport = support;
+
   const provenance: LiveProvenance = toolEv.length > 0 ? 'tool' : (evidence.length > 0 ? 'context' : 'none');
-  return { passed: reasons.length === 0, provenance, reasons, checkedAt: Date.now() };
+  // passed === provenance gate only (tool output present, and no zero-evidence high/critical claim).
+  const passed = reasons.length === 0;
+  if (support.supportLevel === 'unsupported') {
+    reasons.push(`claim category '${support.category}' not demonstrated by the attached evidence — ${support.rationale}`);
+  }
+  const capabilityVerified =
+    provenance === 'tool' &&
+    support.supportLevel === 'supported' &&
+    !CATEGORY_OBSERVATION.has(support.category);
+  return { passed, provenance, reasons, checkedAt: Date.now(), support, capabilityVerified };
 }

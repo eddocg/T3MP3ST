@@ -94,7 +94,7 @@ describe('local API authorization hardening invariants', () => {
     expect(route).toMatch(/ensureExecTargetsAuthorized\(execConfig\.targets,\s*brief\.target,\s*req\.body/);
     expect(route).toMatch(/outOfScopeTargets\.length/);
     expect(route.indexOf('ensureExecTargetsAuthorized(execConfig.targets, brief.target'))
-      .toBeLessThan(route.indexOf('bringUpMissionFromPlan(execConfig, generalConfig)'));
+      .toBeLessThan(route.search(/bringUpMissionFromPlan\(execConfig, generalConfig/));
     expect(route).toMatch(/approvals/);
     expect(route).toMatch(/approvalIds/);
   });

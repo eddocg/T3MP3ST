@@ -242,6 +242,46 @@ export interface Finding {
   exploitedAt?: number;
   /** Result of the live verification gate — present once verifyFinding() has run. */
   verifyGate?: { passed: boolean; provenance: 'none' | 'context' | 'tool'; reasons: string[]; checkedAt: number };
+  /**
+   * Vulnerability family / claim category asserted by the SOURCE (scanner template, builtin
+   * heuristic, or model debrief) — e.g. 'rce', 'credential', 'cors', 'sqli'. This is preserved
+   * verbatim and NEVER rewritten by the support assessment; the deterministic check in
+   * evidence/classification.ts judges whether the attached evidence actually supports it.
+   */
+  category?: string;
+  /**
+   * What kind of record this is: 'observation' (scanner/lead — a header, version, reflected ACAO,
+   * open port) vs 'vulnerability' (evidence of a security-boundary failure or attacker capability).
+   * Scanner output starts as an observation; it is promoted only by demonstrated impact.
+   */
+  observationClass?: 'observation' | 'vulnerability';
+  /**
+   * Provenance: were the configured target credentials/headers actually attached to the request
+   * that produced this finding? Means "credential headers were applied" — NOT that authentication
+   * or authorization succeeded. Absent/undefined = unknown.
+   */
+  authContextApplied?: boolean;
+  /**
+   * Deterministic evidence-vs-claim support assessment (see evidence/classification.ts). Present
+   * once the claim has been evaluated. `supportLevel` is the gate's verdict on whether the
+   * attached evidence supports the asserted `category`; `severityCap` is the highest severity the
+   * evidence will bear. The source-asserted `severity`/`category` above are left untouched so the
+   * operator can see both the claim and the audit of it.
+   */
+  claimSupport?: ClaimSupport;
+}
+
+/** Result of the deterministic claim-vs-evidence assessment. Pure audit; never mutates the claim. */
+export interface ClaimSupport {
+  /** The category the assessment evaluated (echoed from the asserted/derived category). */
+  category: string;
+  /** Does the attached evidence support the asserted category? 'supported' | 'unsupported' | 'unverifiable'. */
+  supportLevel: 'supported' | 'unsupported' | 'unverifiable';
+  /** Highest severity the attached evidence will bear for this category. */
+  severityCap: Severity;
+  /** Human/auditor-readable reason for the verdict. */
+  rationale: string;
+  checkedAt: number;
 }
 
 export interface Evidence {
@@ -312,7 +352,30 @@ export interface Mission {
   completedAt?: number;
   currentPhase: KillChainPhase;
   progress: number;
+  /**
+   * The operator's research objective class — ORTHOGONAL to the routed MissionFamily. A mission
+   * can be family `web_api` while its objective class is `authorization_lifecycle`. This steers
+   * which tasks are seeded (objective work vs. bounded prerequisite recon) and how completion is
+   * reported. 'general' = no narrow objective (default; full kill-chain coverage).
+   */
+  objectiveClass?: MissionObjectiveClass;
+  /**
+   * Whether the objective actually received evidence — distinct from "all tasks drained". Set at
+   * completion. `untested` means the objective lane never ran; `blocked` means a required
+   * prerequisite (second principal, owned resource, state fixture) was missing; `partial`/`met`
+   * reflect how much of the objective hypothesis space was exercised.
+   */
+  objectiveOutcome?: MissionObjectiveOutcome;
 }
+
+export type MissionObjectiveClass = 'general' | 'authorization_lifecycle';
+
+export type MissionObjectiveOutcome =
+  | 'untested'
+  | 'blocked'
+  | 'partial'
+  | 'met'
+  | 'exhausted';
 
 export interface RulesOfEngagement {
   scope: string[];
@@ -492,6 +555,12 @@ export interface ToolFinding {
   /** For 'tool' provenance: the tool that produced it + the raw output backing the claim. */
   toolName?: string;
   toolOutput?: string;
+  /** Source-asserted vulnerability category (e.g. 'cors', 'sqli'). Audited, never rewritten. */
+  category?: string;
+  /** 'observation' (scanner lead) vs 'vulnerability' (demonstrated boundary failure). */
+  observationClass?: 'observation' | 'vulnerability';
+  /** Provenance: were configured credential headers applied to the request? (Not "auth succeeded".) */
+  authContextApplied?: boolean;
 }
 
 export interface ToolResult {
@@ -511,6 +580,13 @@ export interface TempestConfig {
   name: string;
   llm: LLMConfig;
   opsec?: Partial<OpsecConfig>;
+  /**
+   * Optional research objective class (orthogonal to MissionFamily) that steers task seeding and
+   * completion reporting — e.g. 'authorization_lifecycle'. Defaults to 'general'.
+   */
+  objectiveClass?: MissionObjectiveClass;
+  /** Free-text operator directive emphasis that steers the objective lane (advisory). */
+  objectiveDirective?: string;
   operators?: {
     maxConcurrent?: number;
     defaultConfig?: Partial<OperatorConfig>;

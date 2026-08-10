@@ -14,6 +14,7 @@ import type {
   Vulnerability,
 } from '../types/index.js';
 import { gateLiveFinding } from './gate.js';
+import { findingFingerprint, assessClaimSupport } from './classification.js';
 
 // =============================================================================
 // CREDENTIAL REDACTION — secrets NEVER leave the process in an API/LLM output
@@ -96,18 +97,62 @@ function hasPassedVerificationGate(finding: Finding): boolean {
 export class EvidenceVault extends EventEmitter<EvidenceVaultEvents> {
   private findings: Map<string, Finding> = new Map();
   private credentials: Map<string, Credential> = new Map();
+  /** dedup: fingerprint -> finding id (consolidates same-boundary findings). */
+  private fingerprintIndex: Map<string, string> = new Map();
+  private consolidatedCount = 0;
 
   /**
-   * Add a finding
+   * Add a finding. Same-boundary findings are CONSOLIDATED by fingerprint: repeated evidence for
+   * the same origin+route+method+property+selector+principal/resource boundary strengthens ONE
+   * record (evidence merged, severity never exceeds what the merged evidence supports) instead of
+   * minting near-duplicate findings. Distinct authorization failures (different principal→resource
+   * boundary, route, or property) always produce distinct fingerprints and are never merged.
    */
   addFinding(finding: Finding): Finding {
     if (!finding.id) {
       finding.id = randomUUID();
     }
+
+    const fp = findingFingerprint(finding);
+    const existingId = this.fingerprintIndex.get(fp);
+    const existing = existingId ? this.findings.get(existingId) : undefined;
+    if (existing) {
+      // Consolidate: merge new evidence the existing record doesn't already carry.
+      const existingEvidenceKeys = new Set(existing.evidence.map((e) => `${e.type}:${String(e.content).slice(0, 200)}`));
+      for (const e of finding.evidence ?? []) {
+        const key = `${e.type}:${String(e.content).slice(0, 200)}`;
+        if (!existingEvidenceKeys.has(key)) {
+          existing.evidence.push(cloneEvidence(e));
+          existingEvidenceKeys.add(key);
+        }
+      }
+      // Never let consolidation INFLATE severity: keep the LOWER of the two, then re-audit against
+      // merged evidence (support can only cap further, never raise).
+      const order: Severity[] = ['info', 'low', 'medium', 'high', 'critical'];
+      if (order.indexOf(finding.severity) < order.indexOf(existing.severity)) {
+        existing.severity = finding.severity;
+      }
+      existing.claimSupport = assessClaimSupport(existing);
+      if (order.indexOf(existing.severity) > order.indexOf(existing.claimSupport.severityCap)) {
+        existing.severity = existing.claimSupport.severityCap;
+      }
+      this.consolidatedCount++;
+      this.emit('finding:updated', cloneFinding(existing));
+      return cloneFinding(existing);
+    }
+
     const stored = cloneFinding(finding);
+    // Attach the audited support verdict + keep severity within what the evidence bears.
+    stored.claimSupport = stored.claimSupport ?? assessClaimSupport(stored);
     this.findings.set(stored.id, stored);
+    this.fingerprintIndex.set(fp, stored.id);
     this.emit('finding:added', cloneFinding(stored));
     return cloneFinding(stored);
+  }
+
+  /** Number of findings merged into an existing same-fingerprint record (dedup telemetry). */
+  get consolidatedFindings(): number {
+    return this.consolidatedCount;
   }
 
   /**
@@ -141,7 +186,8 @@ export class EvidenceVault extends EventEmitter<EvidenceVaultEvents> {
     if (!finding) return finding;
     const gate = gateLiveFinding(finding);
     finding.verifyGate = { passed: gate.passed, provenance: gate.provenance, reasons: gate.reasons, checkedAt: gate.checkedAt };
-    if (gate.passed) {
+    // verified (demonstrated capability) requires provenance AND evidence-supported category.
+    if (gate.capabilityVerified) {
       finding.verifiedAt = Date.now();
       this.emit('finding:verified', cloneFinding(finding));
     } else {

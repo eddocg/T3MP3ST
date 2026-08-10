@@ -336,7 +336,7 @@ function sanitizeLocalBaseUrl(raw: unknown): { ok: true; value: string | null } 
   return { ok: true, value: v };
 }
 
-function createTempestCommandInstance(missionName: string, apiKey: string | undefined, provider: string, model: string, baseUrl?: string): TempestCommand {
+function createTempestCommandInstance(missionName: string, apiKey: string | undefined, provider: string, model: string, baseUrl?: string, objective?: { objectiveClass?: import('./types/index.js').MissionObjectiveClass; objectiveDirective?: string }): TempestCommand {
   // Tear down previous instance
   if (tempestCommand) {
     tempestCommand.stop();
@@ -346,6 +346,8 @@ function createTempestCommandInstance(missionName: string, apiKey: string | unde
 
   tempestCommand = new TempestCommand({
     name: missionName,
+    objectiveClass: objective?.objectiveClass,
+    objectiveDirective: objective?.objectiveDirective,
     llm: {
       provider: provider as any,
       model,
@@ -700,6 +702,28 @@ interface RetestRecord {
   updatedAt: string;
 }
 
+/**
+ * A persisted NEGATIVE-evidence record: a boundary was exercised and HELD. This is mission memory,
+ * not a finding. `stateMarker` captures the authorization state at test time (role/grant/ownership
+ * snapshot hash) so a later state change can be recognized as a NEW condition requiring retest —
+ * the record is advisory context only and is NEVER a suppression list.
+ */
+interface BoundaryHeldRecord {
+  id: string;
+  workOrderId: string;
+  hypothesisId?: string;
+  missionId?: string;
+  target: string;
+  /** What boundary was exercised (free-text, e.g. "cross-principal read of owned resource"). */
+  boundary: string;
+  /** The observed protective outcome (e.g. "403 Forbidden", "role unchanged"). */
+  outcome: string;
+  /** Authorization state fingerprint at test time; a change here invalidates the prior result. */
+  stateMarker?: string;
+  evidenceIds: string[];
+  createdAt: string;
+}
+
 interface HypothesisRecord {
   id: string;
   missionId?: string;
@@ -832,6 +856,15 @@ const findingsLedger = new Map<string, FindingRecord>();
 const retestLedger = new Map<string, RetestRecord>();
 const hypothesisLedger = new Map<string, HypothesisRecord>();
 const workOrderLedger = new Map<string, WorkOrderRecord>();
+/**
+ * NEGATIVE EVIDENCE memory — a durable record that a security boundary was TESTED and HELD
+ * (e.g. "Principal B -> Principal A's resource returned a correct 403"). Persisted so it is visible
+ * across the mission and NOT silently re-probed within the same state. CRITICAL INVARIANT: this is
+ * NEVER used to automatically suppress a future probe — a 403 captured BEFORE a state transition
+ * (role change / revocation / ownership transfer) must not prevent a required retest AFTER it.
+ * Consumers may only use it to surface "already tested (boundary held)" context to the operator.
+ */
+const boundaryHeldLedger = new Map<string, BoundaryHeldRecord>();
 const watchCycleLedger = new Map<string, WatchCycleRecord>();
 const memoryCapsule = new Map<string, MemoryEntry>();
 const memoryProposals = new Map<string, MemoryProposal>();
@@ -1106,6 +1139,7 @@ function buildStateSnapshot(): Record<string, unknown> {
     retestLedger: [...retestLedger.values()],
     hypothesisLedger: [...hypothesisLedger.values()],
     workOrderLedger: [...workOrderLedger.values()],
+    boundaryHeldLedger: [...boundaryHeldLedger.values()],
     watchCycleLedger: [...watchCycleLedger.values()],
     memoryCapsule: [...memoryCapsule.values()],
     memoryProposals: [...memoryProposals.values()],
@@ -1176,6 +1210,7 @@ async function loadPersistedState(): Promise<void> {
     replaceMapContents(retestLedger, state.retestLedger);
     replaceMapContents(hypothesisLedger, state.hypothesisLedger);
     replaceMapContents(workOrderLedger, state.workOrderLedger);
+    replaceMapContents(boundaryHeldLedger, state.boundaryHeldLedger);
     replaceMapContents(watchCycleLedger, state.watchCycleLedger);
     replaceMapContents(memoryCapsule, state.memoryCapsule);
     replaceMapContents(memoryProposals, state.memoryProposals);
@@ -5624,8 +5659,47 @@ app.post('/api/work-orders/:id/complete', (req: Request, res: Response) => {
     updatedAt: now,
   };
   hypothesisLedger.set(updatedHypothesis.id, updatedHypothesis);
+
+  // NEGATIVE EVIDENCE: when a falsification / owner-control work order completes AGAINST the
+  // hypothesis (the boundary held), persist a durable boundary-held record as mission memory.
+  // Advisory only — it is surfaced to the operator but NEVER auto-suppresses a future probe; a
+  // later authorization-state change (stateMarker differs) still requires a fresh retest.
+  if ((existing.kind === 'disprove' || existing.kind === 'owner_control') && disposition === 'against') {
+    const record: BoundaryHeldRecord = {
+      id: `bh_${randomUUID().slice(0, 8)}`,
+      workOrderId: updatedOrder.id,
+      hypothesisId: hypothesis.id,
+      missionId: updatedOrder.missionId,
+      target: updatedOrder.target,
+      boundary: updatedOrder.objective || updatedOrder.title,
+      outcome: resultSummary || 'boundary held (no unauthorized access observed)',
+      stateMarker: typeof body.stateMarker === 'string' ? body.stateMarker : undefined,
+      evidenceIds,
+      createdAt: now,
+    };
+    boundaryHeldLedger.set(record.id, record);
+    emitContractEvent('boundary.held', { boundaryHeldId: record.id, workOrderId: updatedOrder.id, target: record.target });
+  }
+
   emitContractEvent('work_order.completed', { workOrderId: updatedOrder.id, hypothesisId: hypothesis.id, evidenceIds, disposition });
   res.status(201).json({ workOrder: updatedOrder, hypothesis: updatedHypothesis, evidenceIds });
+});
+
+// NEGATIVE EVIDENCE — list the boundary-held records (advisory mission memory). These are the
+// "we tested it and the boundary HELD" outcomes (e.g. cross-principal 403). Surfaced for operator
+// visibility; NEVER consumed as an auto-suppression list.
+app.get('/api/boundary-held', (req: Request, res: Response) => {
+  const scope = req.query as Record<string, unknown>;
+  const missionId = typeof scope.missionId === 'string' ? scope.missionId : undefined;
+  const records = [...boundaryHeldLedger.values()]
+    .filter((r) => (missionId ? r.missionId === missionId : true))
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  res.json({
+    schema_version: 't3mp3st_boundary_held/v1',
+    note: 'Boundary-held (negative) evidence. Advisory only — a state change (role/revocation/ownership) requires retest; these records never auto-suppress a probe.',
+    count: records.length,
+    records,
+  });
 });
 
 app.get('/api/watch-loop/status', (req: Request, res: Response) => {
@@ -6569,6 +6643,10 @@ app.get('/api/mission/status', (_req: Request, res: Response) => {
       currentPhase: mission.currentPhase,
       progress: mission.progress,
       startedAt: mission.startedAt,
+      // Objective fidelity: the research objective class (orthogonal to family) and whether the
+      // objective actually received evidence (tested/blocked/partial), not merely "tasks drained".
+      objectiveClass: mission.objectiveClass ?? 'general',
+      objectiveOutcome: mission.objectiveOutcome,
     } : null,
     operators: {
       summary: status.operators,
@@ -6902,8 +6980,9 @@ function resolveGeneralLLMConfig(provider: string | undefined, model: string | u
 function bringUpMissionFromPlan(
   execConfig: { missionName: string; targets: string[]; operators: string[] },
   generalConfig: { apiKey?: string; provider: any; model: string; baseUrl?: string },
+  objective?: { objectiveClass?: import('./types/index.js').MissionObjectiveClass; objectiveDirective?: string },
 ): { spawnedOps: Array<{ id: string; callsign: string; archetype: string }>; status: any } {
-  const cmd = createTempestCommandInstance(execConfig.missionName, generalConfig.apiKey, generalConfig.provider, generalConfig.model, generalConfig.baseUrl);
+  const cmd = createTempestCommandInstance(execConfig.missionName, generalConfig.apiKey, generalConfig.provider, generalConfig.model, generalConfig.baseUrl, objective);
   for (const target of execConfig.targets) {
     if (target.startsWith('http://') || target.startsWith('https://')) cmd.targetEnv.addTarget(createTargetFromUrl(target));
     else if (/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/.test(target)) cmd.targetEnv.addTarget(createTargetFromIP(target));
@@ -7608,6 +7687,7 @@ app.post('/api/attack-graph/ingest', (req: Request, res: Response): void => {
 // =============================================================================
 
 import { Admiral, briefToDirective, type ChatMsg, type MissionBrief } from './admiral/index.js';
+import { detectObjectiveClass } from './mission/index.js';
 
 /**
  * POST /api/admiral/converse — one conversational turn with the Admiral.
@@ -7777,7 +7857,13 @@ app.post('/api/admiral/launch', async (req: Request, res: Response): Promise<voi
       // Names only — never the values (those stay inside the arsenal layer and are redacted from output).
       broadcastEvent('admiral:target_headers', { origin: hostFromTarget(brief.target), headerNames });
     }
-    const broughtUp = bringUpMissionFromPlan(execConfig, generalConfig);
+    const broughtUp = bringUpMissionFromPlan(execConfig, generalConfig, {
+      // Objective fidelity: derive the research objective class from the operator's directive so the
+      // mission seeds the objective lane (bounded recon + current-principal baselines + explicit
+      // blocked prerequisites) instead of the generic recon battery. Orthogonal to MissionFamily.
+      objectiveClass: detectObjectiveClass(`${directive.objective} ${directive.constraints ?? ''}`),
+      objectiveDirective: directive.objective,
+    });
     res.json({
       mode: 'live', plan, review: execConfig.review,
       operators: broughtUp.spawnedOps, status: broughtUp.status, sse: '/api/events',

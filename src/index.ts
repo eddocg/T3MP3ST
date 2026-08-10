@@ -333,6 +333,8 @@ export class TempestCommand extends EventEmitter<CommandEvents> {
   private tickCount: number = 0;
   private hooks: RuntimeHooks;
   private readonly taskTimeoutMs: number;
+  private readonly objectiveClass: import('./types/index.js').MissionObjectiveClass;
+  private readonly objectiveDirective?: string;
 
   /**
    * White-box source context (security-prioritized code excerpt), set by the
@@ -367,6 +369,8 @@ export class TempestCommand extends EventEmitter<CommandEvents> {
     super();
     this.name = config.name;
     this.hooks = config.hooks || {};
+    this.objectiveClass = config.objectiveClass ?? 'general';
+    this.objectiveDirective = config.objectiveDirective;
     this.taskTimeoutMs = TempestCommand.resolveTaskTimeoutMs(config.llm.provider);
 
     // Initialize LLM backbone
@@ -829,7 +833,10 @@ export class TempestCommand extends EventEmitter<CommandEvents> {
     const mission = this.mission.createMission({
       name: `${this.name} — Auto Mission`,
       description: `Automated mission for ${targetNames}`,
-      objectives: ['Enumerate attack surface', 'Identify vulnerabilities', 'Validate findings'],
+      objectives: this.objectiveDirective
+        ? [this.objectiveDirective, 'Enumerate attack surface', 'Identify vulnerabilities', 'Validate findings']
+        : ['Enumerate attack surface', 'Identify vulnerabilities', 'Validate findings'],
+      objectiveClass: this.objectiveClass,
     });
     this.mission.startMission(mission.id);
   }

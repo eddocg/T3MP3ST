@@ -111,4 +111,13 @@ describe('evidence-maturity ladder distinguishes observation from verified capab
     // report-ready requires BOTH tool-verification AND a passed retest.
     expect(uiSource).toMatch(/if \(verified && retestPassed\) return \{ key:'report-ready'/);
   });
+
+  it('distinguishes tool-PROVENANCE from demonstrated CAPABILITY (verifyGate.passed != verified)', () => {
+    // A tool-backed observation whose category outruns its evidence is "tool-proven", NOT "verified".
+    expect(uiSource).toContain("'tool-proven'");
+    // verified (capability) requires evidence-supported category, not merely tool output present.
+    expect(uiSource).toMatch(/verified = capabilityVerified/);
+    // The tool-proven rung must warn that provenance is not a demonstrated capability.
+    expect(uiSource).toMatch(/NOT the same as a demonstrated attacker capability/);
+  });
 });

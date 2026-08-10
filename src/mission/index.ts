@@ -9,12 +9,27 @@ import { randomUUID } from 'crypto';
 import {
   KillChainPhase,
   type Mission,
+  type MissionObjectiveClass,
+  type MissionObjectiveOutcome,
   type Task,
   type TaskResult,
   type RulesOfEngagement,
   type OperatorArchetype,
 } from '../types/index.js';
 import { KILL_CHAIN_ORDER } from '../operators/index.js';
+
+/**
+ * Detect the operator's research objective class from the objective + directive text.
+ * ORTHOGONAL to the routed MissionFamily (a `web_api` mission can carry an
+ * `authorization_lifecycle` objective). Pure keyword heuristic — no Danalock/target-specific terms.
+ */
+export function detectObjectiveClass(text: string): MissionObjectiveClass {
+  const t = String(text || '').toLowerCase();
+  if (/\b(authorization|authorisation|access control|bola|bfla|idor|privilege escalation|role (escalation|boundary)|permission boundar|ownership|cross-(user|tenant|principal)|revocation|downgrade|stale access|session revocation|object.?level|function.?level)\b/.test(t)) {
+    return 'authorization_lifecycle';
+  }
+  return 'general';
+}
 
 // =============================================================================
 // EVENTS
@@ -244,6 +259,7 @@ export class MissionControl extends EventEmitter<MissionEvents> {
     objectives: string[];
     phases?: KillChainPhase[];
     rules?: RulesOfEngagement;
+    objectiveClass?: MissionObjectiveClass;
   }): Mission {
     const mission: Mission = {
       id: randomUUID(),
@@ -255,6 +271,9 @@ export class MissionControl extends EventEmitter<MissionEvents> {
       status: 'planning',
       currentPhase: params.phases?.[0] || KillChainPhase.RECON,
       progress: 0,
+      // Objective class is orthogonal to MissionFamily: detect from the objective text when not
+      // explicitly supplied, so a narrow authorization directive binds which tasks get seeded.
+      objectiveClass: params.objectiveClass ?? detectObjectiveClass(params.objectives.join(' ')),
     };
 
     this.missions.set(mission.id, mission);
@@ -288,6 +307,12 @@ export class MissionControl extends EventEmitter<MissionEvents> {
   /**
    * Generate initial tasks for a target under the active mission.
    * Called when a target is added or when a mission starts with existing targets.
+   *
+   * OBJECTIVE FIDELITY: when the mission carries a narrow objectiveClass (e.g.
+   * authorization_lifecycle), this seeds the OBJECTIVE lane (bounded prerequisite recon +
+   * current-principal baselines + explicit blocked prerequisites) instead of the full generic
+   * recon battery. Generic recon is reduced to a labeled prerequisite subset so prerequisites
+   * never silently become the entire mission.
    */
   generateTasksForTarget(targetAddress: string): void {
     const mission = this.getActiveMission();
@@ -300,7 +325,12 @@ export class MissionControl extends EventEmitter<MissionEvents> {
     );
     if (alreadyHasTasksForTarget) return;
 
-    // Always start with recon tasks
+    if (mission.objectiveClass === 'authorization_lifecycle') {
+      this.taskQueue.addMany(createAuthorizationObjectiveTasks(mission.id, targetAddress));
+      return;
+    }
+
+    // Default: general coverage — start with recon tasks.
     const reconTasks = createReconTasks(mission.id, targetAddress);
     this.taskQueue.addMany(reconTasks);
   }
@@ -312,6 +342,17 @@ export class MissionControl extends EventEmitter<MissionEvents> {
   generateNextPhaseTasks(targetAddress: string): void {
     const mission = this.getActiveMission();
     if (!mission) return;
+
+    // OBJECTIVE FIDELITY: a narrow objective mission does NOT advance into the generic
+    // vuln-scan/exploit batteries. The authorization objective lane is self-contained; generic
+    // phase templates would re-introduce the exact off-objective recon the directive forbids.
+    // Only the confirmatory analysis/synthesis step is allowed to run at the end.
+    if (mission.objectiveClass === 'authorization_lifecycle') {
+      if (mission.currentPhase === KillChainPhase.ACTIONS) {
+        this.taskQueue.addMany(createAnalysisTasks(mission.id, targetAddress));
+      }
+      return;
+    }
 
     const phase = mission.currentPhase;
     let tasks: Task[] = [];
@@ -383,6 +424,9 @@ export class MissionControl extends EventEmitter<MissionEvents> {
     mission.status = 'completed';
     mission.completedAt = Date.now();
     mission.progress = 100;
+    // Objective fidelity: completion is more than "task queue drained" — record whether the
+    // objective actually received evidence (tested/blocked/unresolved), derived from the lane tasks.
+    mission.objectiveOutcome = deriveObjectiveOutcome(mission, this.taskQueue.getForMission(missionId));
 
     if (this.activeMissionId === missionId) {
       this.activeMissionId = null;
@@ -694,4 +738,89 @@ export function createAnalysisTasks(missionId: string, targetAddress: string): T
   });
 
   return tasks;
+}
+
+/**
+ * AUTHORIZATION-LIFECYCLE objective lane — seeded instead of the generic recon battery when the
+ * operator's objective is authenticated authorization testing. Honest by construction: it runs the
+ * legitimate bounded prerequisites and the CURRENT-principal baselines the runtime can actually
+ * perform, and it surfaces the multi-principal / state fixtures the runtime CANNOT satisfy as
+ * explicit blocked work — it does NOT fabricate A/B coverage.
+ *
+ * Every task carries `[objective:authorization_lifecycle]` and a `lane:` tag so downstream reporting
+ * can distinguish objective work from prerequisite recon.
+ */
+export function createAuthorizationObjectiveTasks(missionId: string, targetAddress: string): Task[] {
+  const mk = (name: string, description: string, phase: KillChainPhase, operatorType: OperatorArchetype, priority: number): Task => ({
+    id: randomUUID(),
+    missionId,
+    name,
+    description: `[objective:authorization_lifecycle] ${description}`,
+    phase,
+    operatorType,
+    status: 'pending',
+    priority,
+    dependencies: [],
+    createdAt: Date.now(),
+  });
+
+  return [
+    // ── Bounded prerequisite recon (labeled, minimal) — enumerate the API surface so authz
+    //    probes have routes to target. This is a prerequisite, NOT the objective. ──
+    mk(
+      'Prerequisite: authenticated API surface map',
+      `lane:prerequisite. Map the authenticated API surface of ${targetAddress} needed to scope authorization tests: enumerate routes/resources (including any OpenAPI/Swagger spec) using the configured authenticated context (http_request/api_endpoint_discovery/curl_request), record each route + method + owning-resource selector. This is prerequisite recon in service of the authorization objective — do NOT broaden into generic DNS/port/banner/TLS/CSP scanning.`,
+      KillChainPhase.RECON,
+      'recon',
+      10,
+    ),
+    // ── Current-principal baseline (the only authenticated identity the runtime holds) ──
+    mk(
+      'Baseline: current-principal access map',
+      `lane:objective. Using the configured authenticated context, establish the CURRENT principal's baseline on ${targetAddress}: which owned resources/routes it can read and mutate (list own resources, read own profile/role, perform a permitted state change). Record each as evidence with authContextApplied provenance. These baselines are the reference a cross-principal differential would be compared against.`,
+      KillChainPhase.RECON,
+      'scanner',
+      9,
+    ),
+    // ── Explicit blocked prerequisite: second principal / differential cannot be fabricated ──
+    mk(
+      'BLOCKED prerequisite: cross-principal differential (Principal B)',
+      `lane:objective status:blocked-prerequisite. Cross-principal authorization testing (BOLA/BFLA) on ${targetAddress} requires a SECOND controlled principal (Principal B) with its own authenticated session, plus a known resource owned by Principal A. The runtime currently holds a single authenticated identity and no Principal/Resource fixture model, so a true A->B differential CANNOT be executed here. DO NOT substitute generic recon. Report this prerequisite as BLOCKED and request Principal B credentials / an owned-resource fixture from the operator.`,
+      KillChainPhase.WEAPONIZE,
+      'analyst',
+      9,
+    ),
+    // ── Explicit blocked prerequisite: lifecycle/state-transition differential ──
+    mk(
+      'BLOCKED prerequisite: authorization lifecycle differential (revoke/downgrade -> replay)',
+      `lane:objective status:blocked-prerequisite. Authorization-lifecycle testing on ${targetAddress} (authorized -> revoke/downgrade/expire -> replay identical request -> verify access disappears) requires a controlled state transition and a before/after differential executor. The runtime has no structured PRE->ACTION->STATE->RETEST->DIFF work order, so this cannot be executed here. Report as BLOCKED and request the state-change fixture (e.g. a revocable grant / role assignment) from the operator.`,
+      KillChainPhase.WEAPONIZE,
+      'analyst',
+      8,
+    ),
+  ];
+}
+
+/**
+ * Derive the objective outcome for a mission at completion — "did the objective actually get
+ * evidence?", NOT "did the task queue drain?". Conservative: a mission whose objective lane never
+ * produced supporting evidence is reported honestly as blocked/untested rather than complete.
+ */
+export function deriveObjectiveOutcome(mission: Mission, tasks: Task[]): MissionObjectiveOutcome {
+  if (mission.objectiveClass !== 'authorization_lifecycle') return 'met';
+
+  const laneTasks = tasks.filter((t) => t.description.includes('[objective:authorization_lifecycle]'));
+  const objectiveTasks = laneTasks.filter((t) => t.description.includes('lane:objective'));
+  const blockedPrereqs = objectiveTasks.filter((t) => t.description.includes('status:blocked-prerequisite'));
+  const ranObjective = objectiveTasks.filter((t) =>
+    !t.description.includes('status:blocked-prerequisite') && t.status === 'completed',
+  );
+
+  // A missing second principal / state fixture means the central hypothesis could not be exercised.
+  if (blockedPrereqs.length > 0 && ranObjective.length === 0) return 'blocked';
+  if (ranObjective.length === 0) return 'untested';
+  // Current-principal baselines ran, but the differential/lifecycle prerequisites stayed blocked:
+  // the objective was only partially exercised.
+  if (blockedPrereqs.length > 0) return 'partial';
+  return 'partial';
 }

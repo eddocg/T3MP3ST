@@ -44,25 +44,47 @@ describe('honesty spine is load-bearing at finding creation (operator.recordFind
     expect(blocked!.reasons.join(' ')).toMatch(/provenance|evidence/i);
   });
 
-  it('a tool-backed finding (real tool-output evidence) verifies', () => {
+  it('a tool-backed finding whose evidence supports the category verifies (capability)', () => {
     const op = createOperator('test-recon2', 'recon');
     const f = baseFinding({
-      title: 'nmap found open port',
+      title: 'SQL injection confirmed via database error',
       severity: 'high',
-      evidence: [{ type: 'output', content: 'PORT 22/tcp open ssh\n...real nmap output...', timestamp: Date.now() }],
+      cwe: ['CWE-89'],
+      evidence: [{ type: 'output', content: 'ERROR: SQL syntax error near ... MySQL server version for the right syntax', timestamp: Date.now() }],
     });
     op.recordFinding(f);
 
     expect(f.verifyGate?.passed).toBe(true);
     expect(f.verifyGate?.provenance).toBe('tool');
+    expect(f.claimSupport?.supportLevel).toBe('supported');
     expect(f.verifiedAt).toBeTypeOf('number');
   });
 
-  it('getVerified-style filter only surfaces gate-passed findings', () => {
+  it('a tool-backed observation whose category outruns its evidence is tool-proven but NOT capability-verified', () => {
+    const op = createOperator('test-recon2b', 'recon');
+    const f = baseFinding({
+      title: 'cleartext HTTP available',
+      category: 'rce',
+      severity: 'critical',
+      evidence: [{ type: 'output', content: 'HTTP/1.1 200 OK — server responded over plain http:// (no TLS)', timestamp: Date.now() }],
+    });
+    op.recordFinding(f);
+
+    // provenance passes (real tool output), but the RCE claim is unsupported → not capability verified
+    expect(f.verifyGate?.provenance).toBe('tool');
+    expect(f.claimSupport?.category).toBe('rce');
+    expect(f.claimSupport?.supportLevel).toBe('unsupported');
+    expect(f.verifiedAt).toBeUndefined();
+  });
+
+  it('getVerified-style filter surfaces tool-proven findings via verifyGate.passed', () => {
     const op = createOperator('test-recon3', 'recon');
     op.recordFinding(baseFinding({ title: 'prose claim', evidence: [] }));
     op.recordFinding(baseFinding({ title: 'tool claim', evidence: [{ type: 'output', content: 'x'.repeat(20), timestamp: Date.now() }] }));
-    const verified = op.getFindings().filter((f) => f.verifyGate?.passed);
-    expect(verified.map((f) => f.title)).toEqual(['tool claim']);
+    const toolProven = op.getFindings().filter((f) => f.verifyGate?.passed);
+    expect(toolProven.map((f) => f.title)).toEqual(['tool claim']);
+    // but capability verification is a stricter bar — the bare "tool claim" has no capability signal
+    const capabilityVerified = op.getFindings().filter((f) => f.verifiedAt);
+    expect(capabilityVerified.map((f) => f.title)).toEqual([]);
   });
 });

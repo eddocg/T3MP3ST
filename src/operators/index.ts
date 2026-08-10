@@ -477,6 +477,9 @@ export class OperatorAgent extends EventEmitter<OperatorEvents> {
           cvss: finding.cvss,
           cve: finding.cve,
           cwe: finding.cwe,
+          category: finding.category,
+          observationClass: finding.observationClass,
+          authContextApplied: finding.authContextApplied,
           evidence: toolBacked
             ? [{
                 type: 'output',
@@ -626,13 +629,15 @@ Respond in a structured format.`;
    */
   recordFinding(finding: Finding): void {
     // HONESTY SPINE — load-bearing, IN the live path (not an opt-in verifyFinding call).
-    // A finding is stamped verified ONLY if it passes the provenance gate (real tool
-    // output). A model-asserted finding is still recorded — but left UNVERIFIED with the
-    // gate's reasons attached. This enforces the invariant the project sells, at the point
-    // of creation, so a model can no longer assert a "critical" into the record for free.
+    // A finding is stamped verified ONLY if it passes the provenance gate AND its asserted
+    // category is supported by that evidence (capabilityVerified). A model-asserted finding, or a
+    // finding whose category outruns its evidence (e.g. "rce" from a cleartext-HTTP observation),
+    // is still recorded — but left UNVERIFIED with the gate's reasons attached. This enforces the
+    // invariant the project sells, at the point of creation, so a model can no longer assert a
+    // "critical" into the record for free.
     const gate = gateLiveFinding(finding);
     finding.verifyGate = { passed: gate.passed, provenance: gate.provenance, reasons: gate.reasons, checkedAt: gate.checkedAt };
-    if (gate.passed) {
+    if (gate.capabilityVerified) {
       finding.verifiedAt = finding.verifiedAt ?? Date.now();
     } else {
       delete finding.verifiedAt;
@@ -640,7 +645,7 @@ Respond in a structured format.`;
     this.findings.push(finding);
     this._state.findingsCount++;
     this.emit('finding:discovered', { finding });
-    if (!gate.passed) this.emit('finding:gate-blocked', { finding, reasons: gate.reasons });
+    if (!gate.capabilityVerified) this.emit('finding:gate-blocked', { finding, reasons: gate.reasons });
   }
 
   /**
