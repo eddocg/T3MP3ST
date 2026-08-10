@@ -216,6 +216,7 @@ import type {
   ScanProgressEvent,
   Task,
   TaskResult,
+  MissionRunState,
 } from './types/index.js';
 
 // Re-export commonly used types
@@ -247,7 +248,7 @@ import { OpsecController, createBalancedOpsecConfig } from './opsec/index.js';
 import { CommsChannel } from './comms/index.js';
 import { AnalysisEngine } from './analysis/index.js';
 import { LLMBackbone } from './llm/index.js';
-import { getLLMConfig } from './config/index.js';
+import { getLLMConfig, config } from './config/index.js';
 import { AgentLoop } from './agent/index.js';
 import { OpGeneral } from './general/index.js';
 
@@ -517,6 +518,10 @@ export class TempestCommand extends EventEmitter<CommandEvents> {
 
     // Forward mission events
     this.mission.on('mission:completed', () => {
+      // Mark completion BEFORE stop() flips running=false, so getRunState() can distinguish a
+      // genuine 'completed' terminal state from a bare 'idle'/stopped command (never collapse
+      // active:false into completed, and never collapse completed into aborted).
+      this.completedFlag = true;
       this.stop();
     });
 
@@ -849,6 +854,9 @@ export class TempestCommand extends EventEmitter<CommandEvents> {
 
     this.running = false;
     this.taskSeeded = false;
+    // An explicit operator stop/abort is a TERMINAL state distinct from "completed" — but only when
+    // the mission didn't just complete (completedFlag is set first by the mission:completed listener).
+    if (!this.completedFlag) this.abortedFlag = true;
     // Drop any pending timeout-reconciliation markers — a promise that never
     // settles must not leave its id lingering across missions.
     this.timedOutDispatches.clear();
@@ -869,12 +877,25 @@ export class TempestCommand extends EventEmitter<CommandEvents> {
   }
 
   /**
-   * Resume operations
+   * Resume operations. When the pause was caused by a STALL (required work failed), resume is
+   * recovery-gated: it re-evaluates authoritative task state and REFUSES to resume while blockers
+   * remain, rather than blindly clearing the stall and hiding the failure. A plain operator pause
+   * (no stallReason) resumes immediately.
    */
   public resume(): void {
     if (!this.running || !this.paused) return;
+    if (this.stallReason) {
+      const outcome = this.recoverMission();
+      if (!outcome.resumed) {
+        // Stay stalled; the caller surfaces outcome.blocking to the operator.
+        this.emit('command:resume-refused', outcome);
+        return;
+      }
+      return; // recoverMission already cleared stall + unpaused
+    }
     this.paused = false;
     this.stallReason = null;
+    this.stallSince = null;
     this.emit('command:resumed');
   }
 
@@ -925,14 +946,15 @@ export class TempestCommand extends EventEmitter<CommandEvents> {
    * provider-specific default. Guards against a non-numeric / non-positive override.
    */
   private static resolveTaskTimeoutMs(provider?: LLMProvider): number {
-    const DEFAULT_TASK_TIMEOUT_MS = 300000; // 5 minutes — generous backstop, not a deadline
-    const LOCAL_AGENT_TASK_TIMEOUT_MS = 1800000; // local CLI agents can need multiple slow turns
-    const raw = process.env.T3MP3ST_TASK_TIMEOUT_MS;
-    if (raw != null && raw.trim() !== '') {
-      const parsed = Number(raw);
-      if (Number.isFinite(parsed) && parsed > 0) return parsed;
+    // Consolidated timeout model: UI override > env (T3MP3ST_TASK_TIMEOUT_MS) > default.
+    // The local-agent provider runs multi-turn CLI work that legitimately needs a much larger
+    // backstop, so when no explicit override is set we floor the effective value at 30m for it.
+    const resolved = config.getTimeout('dispatchTimeoutMs').valueMs;
+    if (provider === 'local-agent') {
+      const LOCAL_AGENT_FLOOR_MS = 1800000; // 30 minutes — local CLI agents need multiple slow turns
+      return Math.max(resolved, LOCAL_AGENT_FLOOR_MS);
     }
-    return provider === 'local-agent' ? LOCAL_AGENT_TASK_TIMEOUT_MS : DEFAULT_TASK_TIMEOUT_MS;
+    return resolved;
   }
 
   /** Track whether we've seeded initial tasks for the current mission */
@@ -940,6 +962,18 @@ export class TempestCommand extends EventEmitter<CommandEvents> {
 
   /** Human-readable reason a mission was paused because required work failed. */
   private stallReason: string | null = null;
+
+  /** When the current stall began (ms epoch). Null when not stalled. */
+  private stallSince: number | null = null;
+
+  /** Last recovery action taken (for status/diagnostics). */
+  private lastRecoveryAction: string | null = null;
+
+  /** Whether the mission was explicitly aborted/stopped by the operator (terminal, ≠ completed). */
+  private abortedFlag: boolean = false;
+
+  /** Whether the active mission reached a completed terminal state (distinct from idle/aborted). */
+  private completedFlag: boolean = false;
 
   /**
    * Main tick loop — seeds tasks, dispatches to operators, advances phases
@@ -1004,6 +1038,7 @@ export class TempestCommand extends EventEmitter<CommandEvents> {
         const firstError = failedCurrentPhase[0].result?.error;
         this.stallReason = `stalled in ${mission.currentPhase}: ${failedCurrentPhase.length} required task(s) failed` +
           (firstError ? ` — ${firstError}` : '');
+        this.stallSince = this.stallSince ?? Date.now();
         this.paused = true;
         this.emit('command:paused');
         return;
@@ -1084,6 +1119,8 @@ export class TempestCommand extends EventEmitter<CommandEvents> {
       this.dispatchStartTimes.set(task.id, Date.now());
       this.dispatchOperators.set(task.id, operator);
       taskQueue.assign(task.id, operator.id);
+      // Begin a new attempt in the task's immutable history (retries append, never rewrite).
+      taskQueue.beginAttempt(task.id);
 
       // Execute asynchronously
       operator.assignTask(task, target).then((result) => {
@@ -1097,8 +1134,10 @@ export class TempestCommand extends EventEmitter<CommandEvents> {
         this.clearDispatch(task.id);
         if (result.success === false) {
           taskQueue.fail(task.id, result.error || result.output || 'task returned unsuccessful result');
+          taskQueue.recordAttempt(task.id, 'failed', result.error || result.output);
         } else {
           taskQueue.complete(task.id, result);
+          taskQueue.recordAttempt(task.id, 'completed');
           this.hooks.onTaskCompleted?.(task);
         }
       }).catch((_error) => {
@@ -1172,6 +1211,7 @@ export class TempestCommand extends EventEmitter<CommandEvents> {
       ].filter(Boolean).join('\n'),
     };
     taskQueue.complete(task.id, reconciled);
+    taskQueue.recordAttempt(task.id, 'timeout_late_success', priorError);
     this.hooks.onTaskCompleted?.(task);
     console.warn(`[T3MP3ST] task ${task.id} reconciled failed→completed — operator finished after the timeout backstop fired`);
   }
@@ -1234,6 +1274,8 @@ export class TempestCommand extends EventEmitter<CommandEvents> {
       //    no-op-ish overwrite that still lets the phase advance).
       try {
         taskQueue.fail(taskId, `timeout: ${reason}`);
+        // Record the timeout as this attempt's outcome WITHOUT erasing it — history is auditable.
+        taskQueue.recordAttempt(taskId, overTime ? 'timeout_pending' : 'failed', reason);
       } catch {
         // Swallow — task may already be terminal.
       }
@@ -1251,6 +1293,148 @@ export class TempestCommand extends EventEmitter<CommandEvents> {
       // 3) Reset the wedged operator back to idle so it can pick up new work.
       operator?.abortActiveTask(reason);
     }
+  }
+
+  // ===========================================================================
+  // STALLED-MISSION RECOVERY — re-evaluate authoritative state, never blindly resume
+  // ===========================================================================
+
+  /**
+   * Recovery disposition for a single task, distinguishing timeout/late-settle races from hard
+   * failures. Drives both recovery decisions and operator-facing diagnostics.
+   */
+  public describeTaskRecovery(task: Task): {
+    id: string; name: string; required: boolean; retryable: boolean;
+    state: 'timeout_pending' | 'timeout_late_success' | 'timeout_late_failure' | 'retryable' | 'non_retryable' | 'ok';
+    detail: string;
+  } {
+    const required = task.required !== false;
+    const timedOut = this.timedOutDispatches.has(task.id);
+    const lastAttempt = task.attempts?.[task.attempts.length - 1];
+    const errText = task.result?.error || lastAttempt?.error || '';
+
+    // A task that the backstop force-failed but whose underlying promise has NOT settled is
+    // genuinely still running — re-dispatching it now would create an unsafe duplicate execution.
+    if (timedOut && lastAttempt?.outcome === 'timeout_pending' && task.status === 'failed') {
+      return { id: task.id, name: task.name, required, retryable: false, state: 'timeout_pending', detail: `timed out but underlying operation still in flight — retry deferred to avoid a duplicate execution (${errText})` };
+    }
+    if (lastAttempt?.outcome === 'timeout_late_success') {
+      return { id: task.id, name: task.name, required, retryable: false, state: 'timeout_late_success', detail: 'timed out, then reconciled to completed by a late success' };
+    }
+    if (task.status === 'failed') {
+      // Non-retryable: a failed dependency blocks it, or an objective-prerequisite blocked lane,
+      // or a hard (non-timeout) error like a refused approval.
+      const depFailed = task.dependencies.some((d) => this.mission.getTaskQueue().getTask(d)?.status === 'failed');
+      const objectiveBlocked = /status:blocked-prerequisite/.test(task.description);
+      const hardRefusal = /approv|scope|denied|unauthorized|out of scope/i.test(errText);
+      if (depFailed || objectiveBlocked || hardRefusal) {
+        return { id: task.id, name: task.name, required, retryable: false, state: 'non_retryable', detail: errText || 'failed (non-retryable)' };
+      }
+      return { id: task.id, name: task.name, required, retryable: true, state: timedOut ? 'timeout_late_failure' : 'retryable', detail: errText || 'failed' };
+    }
+    return { id: task.id, name: task.name, required, retryable: false, state: 'ok', detail: '' };
+  }
+
+  /**
+   * Reconcile + re-evaluate the authoritative mission state, then resume ONLY if no required
+   * blocker remains. Never blindly clears a stall; never fabricates a success; never creates an
+   * unsafe duplicate of a still-running timed-out task. Returns the full diagnostic picture.
+   */
+  public recoverMission(): {
+    resumed: boolean;
+    state: MissionRunState;
+    blocking: Array<ReturnType<TempestCommand['describeTaskRecovery']>>;
+    retryableTaskIds: string[];
+    note: string;
+  } {
+    const taskQueue = this.mission.getTaskQueue();
+    const mission = this.mission.getActiveMission();
+    if (!taskQueue || !mission) {
+      return { resumed: false, state: this.getRunState(), blocking: [], retryableTaskIds: [], note: 'no active mission' };
+    }
+
+    // 1) Re-reap any newly-wedged dispatches and reconcile authoritative current state.
+    //    (reconcileLateResult already flips known late successes failed→completed as they arrive;
+    //    we do NOT claim to synchronously drain late settles that have not arrived yet.)
+    this.checkDispatchTimeouts(taskQueue);
+
+    // 2) Recompute the current phase's required blockers from authoritative task state.
+    const phaseTasks = taskQueue.getForMission(mission.id).filter((t) => t.phase === mission.currentPhase);
+    const failed = phaseTasks.filter((t) => t.status === 'failed');
+    const described = failed.map((t) => this.describeTaskRecovery(t));
+    const blocking = described.filter((d) => d.required);
+    const retryableTaskIds = described.filter((d) => d.retryable).map((d) => d.id);
+
+    // 3) Blockers remain → refuse to resume, expose them.
+    if (blocking.length > 0) {
+      this.lastRecoveryAction = `recover: refused — ${blocking.length} required blocker(s)`;
+      return { resumed: false, state: this.getRunState(), blocking, retryableTaskIds, note: 'required blockers remain — resolve via retry/skip before resume' };
+    }
+
+    // 4) No required blockers → clear stale stall + resume phase advancement.
+    this.stallReason = null;
+    this.stallSince = null;
+    this.paused = false;
+    this.lastRecoveryAction = 'recover: resumed (no required blockers)';
+    this.emit('command:resumed');
+    return { resumed: true, state: this.getRunState(), blocking: [], retryableTaskIds, note: 'no required blockers — resumed' };
+  }
+
+  /**
+   * Retry a failed task as a NEW attempt (history preserved). Refuses to retry a task whose
+   * underlying operation may still be running (timeout_pending) to avoid a duplicate execution,
+   * and refuses non-retryable failures. Returns the updated disposition.
+   */
+  public retryTask(taskId: string): { ok: boolean; error?: string; attempts?: number } {
+    const taskQueue = this.mission.getTaskQueue();
+    const task = taskQueue.getTask(taskId);
+    if (!task) return { ok: false, error: 'task not found' };
+    const d = this.describeTaskRecovery(task);
+    if (d.state === 'timeout_pending') {
+      return { ok: false, error: 'underlying operation still in flight after timeout — retry deferred to avoid a duplicate execution' };
+    }
+    if (!d.retryable) {
+      return { ok: false, error: `task is not retryable (${d.state}): ${d.detail}` };
+    }
+    const updated = taskQueue.retry(taskId);
+    if (!updated) return { ok: false, error: 'task is not in a failed state' };
+    this.lastRecoveryAction = `retry: requeued task ${taskId} as attempt #${(updated.attempts?.length ?? 0) + 1}`;
+    this.emit('command:task-retried', { taskId });
+    return { ok: true, attempts: (updated.attempts?.length ?? 0) + 1 };
+  }
+
+  /**
+   * Skip a genuinely OPTIONAL failed task → terminal 'skipped' (never 'completed'). Required tasks
+   * are not skippable.
+   */
+  public skipTask(taskId: string): { ok: boolean; error?: string } {
+    const taskQueue = this.mission.getTaskQueue();
+    const task = taskQueue.getTask(taskId);
+    if (!task) return { ok: false, error: 'task not found' };
+    if (task.required !== false) return { ok: false, error: 'required tasks cannot be skipped' };
+    const updated = taskQueue.skip(taskId);
+    if (!updated) return { ok: false, error: 'task cannot be skipped from its current state' };
+    this.lastRecoveryAction = `skip: optional task ${taskId} marked skipped`;
+    this.emit('command:task-skipped', { taskId });
+    return { ok: true };
+  }
+
+  /**
+   * Complete derived mission/execution state. NOT collapsed to "active = live": idle (no mission),
+   * running, paused, stalled, completed, and aborted are all distinguishable.
+   */
+  public getRunState(): MissionRunState {
+    const mission = this.mission.getActiveMission();
+    if (!this.running) {
+      // Terminal/not-running states are distinguishable: completed ≠ aborted ≠ idle.
+      if (this.completedFlag) return 'completed';
+      if (this.abortedFlag) return 'aborted';
+      return 'idle';
+    }
+    if (mission?.status === 'completed') return 'completed';
+    if (this.stallReason) return 'stalled';
+    if (this.paused) return 'paused';
+    return 'running';
   }
 
   /**
@@ -1394,6 +1578,12 @@ export class TempestCommand extends EventEmitter<CommandEvents> {
     opsec: ReturnType<OpsecController['getStats']>;
     activeMission: string | null;
     stallReason: string | null;
+    stallSince: number | null;
+    lastRecoveryAction: string | null;
+    /** Complete derived state — 'active:true' never alone means "live". */
+    state: MissionRunState;
+    blockingTaskIds: string[];
+    retryableTaskIds: string[];
     progress: ScanProgressEvent[];
     tasks: Array<{
       id: string;
@@ -1401,12 +1591,22 @@ export class TempestCommand extends EventEmitter<CommandEvents> {
       phase: string;
       status: string;
       operatorType: string;
+      required: boolean;
+      attempts: number;
       assignedTo?: string;
       result?: { success: boolean; output?: string; error?: string; findings?: string[] };
     }>;
   } {
     const activeMission = this.mission.getActiveMission();
     const taskQueue = this.mission.getTaskQueue();
+    const missionTasks = activeMission ? taskQueue.getForMission(activeMission.id) : [];
+    const failedRequired = missionTasks.filter((t) => t.status === 'failed' && t.required !== false);
+    const blockingTaskIds = failedRequired.map((t) => t.id);
+    const retryableTaskIds = missionTasks
+      .filter((t) => t.status === 'failed')
+      .map((t) => this.describeTaskRecovery(t))
+      .filter((d) => d.retryable)
+      .map((d) => d.id);
 
     return {
       name: this.name,
@@ -1419,14 +1619,20 @@ export class TempestCommand extends EventEmitter<CommandEvents> {
       opsec: this.opsec.getStats(),
       activeMission: activeMission?.id || null,
       stallReason: this.stallReason,
+      stallSince: this.stallSince,
+      lastRecoveryAction: this.lastRecoveryAction,
+      state: this.getRunState(),
+      blockingTaskIds,
+      retryableTaskIds,
       progress: [...this.progressEvents],
-      tasks: activeMission
-        ? taskQueue.getForMission(activeMission.id).map(task => ({
+      tasks: missionTasks.map(task => ({
             id: task.id,
             name: task.name,
             phase: task.phase,
             status: task.status,
             operatorType: task.operatorType,
+            required: task.required !== false,
+            attempts: task.attempts?.length ?? 0,
             assignedTo: task.assignedTo,
             result: task.result ? {
               success: task.result.success,
@@ -1434,8 +1640,7 @@ export class TempestCommand extends EventEmitter<CommandEvents> {
               error: task.result.error,
               findings: task.result.findings,
             } : undefined,
-          }))
-        : [],
+          })),
     };
   }
 

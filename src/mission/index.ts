@@ -12,6 +12,7 @@ import {
   type MissionObjectiveClass,
   type MissionObjectiveOutcome,
   type Task,
+  type TaskAttempt,
   type TaskResult,
   type RulesOfEngagement,
   type OperatorArchetype,
@@ -152,6 +153,66 @@ export class TaskQueue extends EventEmitter<TaskQueueEvents> {
       if (status === 'in_progress') task.startedAt = Date.now();
       if (status === 'completed' || status === 'failed') task.completedAt = Date.now();
     }
+    return task;
+  }
+
+  /**
+   * Close out the current execution attempt in the task's immutable attempt history.
+   * Called on terminal transitions (complete/fail/timeout). History is never rewritten — a retry
+   * appends a NEW attempt; the prior attempt's outcome stays visible for audit/recovery.
+   */
+  recordAttempt(taskId: string, outcome: TaskAttempt['outcome'], error?: string): void {
+    const task = this.tasks.find(t => t.id === taskId);
+    if (!task) return;
+    if (!task.attempts) task.attempts = [];
+    const open = task.attempts[task.attempts.length - 1];
+    if (open && open.endedAt == null) {
+      open.endedAt = Date.now();
+      open.outcome = outcome;
+      if (error) open.error = error;
+    } else {
+      // No open attempt (e.g. direct fail without a dispatch) — record a closed one.
+      task.attempts.push({ attemptId: randomUUID(), n: task.attempts.length + 1, startedAt: task.startedAt ?? Date.now(), endedAt: Date.now(), outcome, error });
+    }
+  }
+
+  /** Begin a new attempt (called on dispatch). */
+  beginAttempt(taskId: string): void {
+    const task = this.tasks.find(t => t.id === taskId);
+    if (!task) return;
+    if (!task.attempts) task.attempts = [];
+    task.attempts.push({ attemptId: randomUUID(), n: task.attempts.length + 1, startedAt: Date.now(), outcome: 'timeout_pending' });
+  }
+
+  /**
+   * Retry a FAILED task: requeue as pending WITHOUT erasing its attempt history. The prior
+   * timeout/failure stays recorded in `attempts`; this creates a new legitimate attempt.
+   * Returns false if the task is not currently failed (nothing to retry) — never retries a task
+   * whose underlying operation may still be running (the caller checks timedOutDispatches first).
+   */
+  retry(taskId: string): Task | undefined {
+    const task = this.tasks.find(t => t.id === taskId);
+    if (!task || task.status !== 'failed') return undefined;
+    task.status = 'pending';
+    task.completedAt = undefined;
+    // Keep task.result (the prior attempt's error) until the new attempt produces a result —
+    // it is the audit trail for why a retry was needed. attempts[] already holds the history.
+    return task;
+  }
+
+  /**
+   * Skip a genuinely OPTIONAL failed task → terminal 'skipped'. NEVER rewrites it as 'completed'.
+   * Required tasks are not skippable (returns undefined).
+   */
+  skip(taskId: string): Task | undefined {
+    const task = this.tasks.find(t => t.id === taskId);
+    if (!task) return undefined;
+    const isRequired = task.required !== false; // default true
+    if (isRequired) return undefined;
+    if (task.status !== 'failed' && task.status !== 'pending') return undefined;
+    task.status = 'skipped';
+    task.completedAt = Date.now();
+    this.recordAttempt(taskId, 'failed', 'skipped by operator (optional task)');
     return task;
   }
 

@@ -17,6 +17,7 @@ import { join } from 'path';
 import { promisify } from 'util';
 import { createHash, randomUUID } from 'crypto';
 import { config, AVAILABLE_MODELS } from './config/index.js';
+import { TIMEOUT_REGISTRY, validateTimeoutHierarchy, formatTimeout } from './config/timeouts.js';
 import { resolveModels } from './config/provider-models.js';
 import { initProxyFromConfig, configureProxy, getProxyStatus, checkIp, invalidateIpCache } from './net/proxy.js';
 import { redactString, redactLedgerText, redactSecrets } from './redact.js';
@@ -4976,6 +4977,73 @@ app.get('/api/net/ip', async (req: Request, res: Response): Promise<void> => {
   }
 });
 
+// ── Mission Execution / Timeouts (consolidated model: src/config/timeouts.ts) ──
+// GET returns each tunable timeout with effective value, source (ui/env/default), default, bounds,
+// and whether an env value exists but is overridden by a UI value. No secrets are ever returned.
+app.get('/api/settings/timeouts', (_req: Request, res: Response) => {
+  const ui = (config.getAll().timeouts ?? {}) as Record<string, number>;
+  const effective: Record<string, number> = {};
+  for (const spec of TIMEOUT_REGISTRY) effective[spec.key] = config.getTimeout(spec.key).valueMs;
+  const conflicts = validateTimeoutHierarchy(effective);
+  res.json({
+    schema_version: 't3mp3st_timeouts/v1',
+    precedence: 'ui > env > default',
+    note: 'Supervising timeouts (e.g. dispatch backstop) must stay >= the work they supervise + reconciliation grace. Class-C safety invariants are fixed and not configurable.',
+    settings: TIMEOUT_REGISTRY.map((spec) => {
+      const r = config.getTimeout(spec.key);
+      return {
+        key: spec.key,
+        label: spec.label,
+        unit: spec.unit,
+        valueMs: r.valueMs,
+        value: formatTimeout(spec, r.valueMs),
+        defaultMs: spec.defaultMs,
+        default: formatTimeout(spec, spec.defaultMs),
+        minMs: spec.minMs,
+        maxMs: spec.maxMs,
+        source: r.source,
+        envVar: spec.envVar ?? null,
+        // env value exists but is overridden by a UI value
+        envOverridden: r.source === 'ui' && r.envPresent,
+        uiSet: ui[spec.key] != null,
+        restartRequired: spec.restartRequired,
+        class: spec.class,
+        blurb: spec.blurb,
+      };
+    }),
+    conflicts,
+  });
+});
+
+// POST a timeout override. Body: { key, valueMs } to set; { key, valueMs:null } or { reset:true, key? }
+// to REMOVE a UI override (honest reset — env/default precedence resumes). Validates bounds and the
+// parent/child hierarchy; 400 + explanatory conflicts on violation. Never accepts Class-C keys.
+app.post('/api/settings/timeouts', (req: Request, res: Response): void => {
+  const body = (req.body ?? {}) as { key?: string; valueMs?: number | null; reset?: boolean };
+  try {
+    if (body.reset) {
+      if (body.key) config.resetTimeout(body.key); else config.resetTimeouts();
+      res.json({ ok: true, reset: true });
+      return;
+    }
+    if (!body.key) {
+      res.status(400).json({ error: 'key required' });
+      return;
+    }
+    if (body.valueMs == null) {
+      // Explicit null = remove the override (same as reset for that key).
+      config.resetTimeout(body.key);
+      res.json({ ok: true, reset: true, key: body.key });
+      return;
+    }
+    config.setTimeout(body.key, body.valueMs);
+    const r = config.getTimeout(body.key);
+    res.json({ ok: true, key: body.key, valueMs: r.valueMs, source: r.source });
+  } catch (e) {
+    res.status(400).json({ error: (e as Error)?.message || 'Invalid timeout value' });
+  }
+});
+
 app.get('/api/arsenal/catalog', (req: Request, res: Response) => {
   const family = typeof req.query.family === 'string' ? normalizeMissionFamily(req.query.family, 'web_api') : undefined;
   const category = typeof req.query.category === 'string' ? req.query.category : '';
@@ -6610,9 +6678,67 @@ app.post('/api/mission/resume', (_req: Request, res: Response) => {
     return;
   }
 
+  // Recovery-gated resume: if the pause was a STALL (required work failed), resume re-evaluates
+  // authoritative task state and refuses while blockers remain — it never blindly clears a stall.
+  const wasStalled = !!cmd.getStatus().stallReason;
+  if (wasStalled) {
+    const outcome = cmd.recoverMission();
+    if (!outcome.resumed) {
+      broadcastEvent('mission:resume-refused', { blocking: outcome.blocking, note: outcome.note });
+      res.status(409).json({
+        success: false,
+        error: 'Mission has unresolved required blockers — resolve via retry/skip before resuming',
+        blocking: outcome.blocking,
+        retryableTaskIds: outcome.retryableTaskIds,
+        state: outcome.state,
+      });
+      return;
+    }
+    broadcastEvent('mission:resumed', { timestamp: Date.now(), recovered: true });
+    res.json({ success: true, message: 'Mission resumed (no required blockers)', state: outcome.state });
+    return;
+  }
+
   cmd.resume();
   broadcastEvent('mission:resumed', { timestamp: Date.now() });
   res.json({ success: true, message: 'Mission resumed' });
+});
+
+// ── Stalled-mission recovery ──
+// POST /api/mission/recover — re-evaluate authoritative state, reconcile late results, resume only
+// if no required blocker remains. Returns the full blocker picture when it cannot resume.
+app.post('/api/mission/recover', (_req: Request, res: Response) => {
+  const cmd = getTempestCommand();
+  if (!cmd) {
+    res.status(404).json({ error: 'No active mission' });
+    return;
+  }
+  const outcome = cmd.recoverMission();
+  if (!outcome.resumed) broadcastEvent('mission:resume-refused', { blocking: outcome.blocking, note: outcome.note });
+  else broadcastEvent('mission:resumed', { timestamp: Date.now(), recovered: true });
+  res.status(outcome.resumed ? 200 : 409).json({ success: outcome.resumed, ...outcome });
+});
+
+// POST /api/mission/tasks/:id/retry — requeue a retryable failed task as a NEW attempt (history
+// preserved). Refuses non-retryable failures and timeout_pending (still-running) tasks.
+app.post('/api/mission/tasks/:id/retry', (req: Request, res: Response): void => {
+  const cmd = getTempestCommand();
+  if (!cmd) { res.status(404).json({ error: 'No active mission' }); return; }
+  const r = cmd.retryTask(req.params.id);
+  if (!r.ok) { res.status(400).json({ success: false, error: r.error }); return; }
+  broadcastEvent('mission:task-retried', { taskId: req.params.id });
+  res.json({ success: true, taskId: req.params.id, attempts: r.attempts });
+});
+
+// POST /api/mission/tasks/:id/skip — mark a genuinely OPTIONAL failed task 'skipped' (terminal,
+// never 'completed'). Required tasks are not skippable.
+app.post('/api/mission/tasks/:id/skip', (req: Request, res: Response): void => {
+  const cmd = getTempestCommand();
+  if (!cmd) { res.status(404).json({ error: 'No active mission' }); return; }
+  const r = cmd.skipTask(req.params.id);
+  if (!r.ok) { res.status(400).json({ success: false, error: r.error }); return; }
+  broadcastEvent('mission:task-skipped', { taskId: req.params.id });
+  res.json({ success: true, taskId: req.params.id, status: 'skipped' });
 });
 
 /**
@@ -6634,6 +6760,12 @@ app.get('/api/mission/status', (_req: Request, res: Response) => {
     active: status.running,
     paused: status.paused,
     stallReason: status.stallReason,
+    stallSince: status.stallSince,
+    lastRecoveryAction: status.lastRecoveryAction,
+    // Complete derived state — 'active:true' never alone means "live probing".
+    state: status.state,
+    blockingTaskIds: status.blockingTaskIds,
+    retryableTaskIds: status.retryableTaskIds,
     name: status.name,
     tickCount: status.tickCount,
     mission: mission ? {
@@ -6967,7 +7099,9 @@ function resolveGeneralLLMConfig(provider: string | undefined, model: string | u
     ...(selectedProvider === 'local' && localBaseUrl ? { baseUrl: localBaseUrl } : {}),
     maxTokens: 8192,
     temperature: 0.4,
-    timeout: readGeneralTimeoutEnv() ?? 300000, // General planning needs room (was a hardcoded 60s); override via env
+    // Consolidated timeout model: planner timeout resolves UI > env (TEMPEST_/T3MP3ST_GENERAL_TIMEOUT_MS)
+    // > default. General planning needs room (was a hardcoded 60s); the local-agent chain below floors it higher.
+    timeout: readGeneralTimeoutEnv() ?? config.getTimeout('plannerTimeoutMs').valueMs,
   };
 }
 

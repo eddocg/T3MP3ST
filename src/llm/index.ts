@@ -22,6 +22,11 @@ import { config } from '../config/index.js';
 import { localAgentChat } from '../agent/local-agents.js';
 import { fetchBypassingProxy } from '../net/proxy.js';
 
+/** Module-level config accessor — avoids the `config: LLMConfig` constructor-param shadow. */
+function configModule() {
+  return config;
+}
+
 // =============================================================================
 // LLM EVENTS
 // =============================================================================
@@ -1520,6 +1525,12 @@ export class LLMBackbone extends EventEmitter<LLMEvents> {
     super();
     this.config = config;
     this.adapter = this.createAdapter(config);
+    // Consolidated timeout/retry model: UI override > env > default (src/config/timeouts.ts).
+    // Applied per-backbone so a live settings change affects the next construction. Read into
+    // locals first because the `config` param shadows the imported module config here.
+    const cfg = configModule();
+    this.retryAttempts = cfg.getTimeout('llmRetryAttempts').valueMs;
+    this.retryDelayMs = cfg.getTimeout('llmRetryDelayMs').valueMs;
     if (config.provider === 'codex') {
       this.retryAttempts = 1;
     }

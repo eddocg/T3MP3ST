@@ -4379,6 +4379,7 @@
                     </div>
 
                     <div id="liveScanSummary" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;margin-bottom:14px;"></div>
+                    <div id="stallRecoveryPanel" style="display:none;margin-bottom:14px;"></div>
 
                     <div class="live-scan-grid">
                         <section style="background:var(--bg-secondary);border:1px solid var(--border-color);border-radius:8px;overflow:hidden;">
@@ -5866,6 +5867,25 @@
                         <h2 class="settings-title">⚠️ Data</h2>
                         <div class="card" style="border-color: var(--danger);">
                             <button class="btn btn-danger" onclick="clearAllData()">Clear All Data</button>
+                        </div>
+                    </div>
+
+                    <!-- Mission Execution / Timeouts -->
+                    <div class="settings-section">
+                        <h2 class="settings-title">⏱️ Mission Execution / Timeouts</h2>
+                        <p style="color: var(--text-muted); font-size: 12px; margin-bottom: 12px;">
+                            Consolidated mission-execution timeouts. Precedence: <b>UI override &gt; environment &gt; default</b>.
+                            Supervising timeouts (e.g. the dispatch backstop) must stay ≥ the work they supervise plus a reconciliation grace —
+                            invalid combinations are rejected. Safety invariants (ScopeGuard, approvals, secret handling) are fixed and never tunable here.
+                        </p>
+                        <div class="card">
+                            <div id="timeoutsList" style="display:flex;flex-direction:column;gap:12px;">
+                                <div style="color:var(--text-muted);font-size:12px;">Loading…</div>
+                            </div>
+                            <div style="display:flex;gap:8px;margin-top:14px;">
+                                <button class="btn btn-secondary" onclick="loadTimeouts()">Refresh</button>
+                                <button class="btn btn-danger" onclick="resetAllTimeouts()">Reset all to defaults</button>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -7444,6 +7464,142 @@ Correlating findings across agents, identifying patterns, producing actionable i
             window.updateLiveScanStatus(status);
         };
 
+        // ── Stalled-mission recovery ─────────────────────────────────────────
+        async function recoverMission() {
+            const r = await T3MP3ST_API.post('/api/mission/recover', {});
+            if (!r || r.error || r.success === false) {
+                const blockers = (r && r.blocking) || [];
+                alert(`Resume refused — required blockers remain:\n\n` + (blockers.map(b => `• ${b.name}: ${b.detail || b.state}`).join('\n') || (r && r.error) || 'unknown'));
+                return;
+            }
+            await window.refreshLiveScanPage();
+        }
+        async function retryTask(taskId) {
+            const r = await T3MP3ST_API.post(`/api/mission/tasks/${encodeURIComponent(taskId)}/retry`, {});
+            if (!r || r.error || r.success === false) alert(`Retry refused: ${(r && r.error) || 'unknown'}`);
+            await window.refreshLiveScanPage();
+        }
+        async function skipTask(taskId) {
+            if (!confirm('Skip this OPTIONAL task? It will be marked "skipped" (never completed) in the audit trail.')) return;
+            const r = await T3MP3ST_API.post(`/api/mission/tasks/${encodeURIComponent(taskId)}/skip`, {});
+            if (!r || r.error || r.success === false) alert(`Skip refused: ${(r && r.error) || 'unknown'}`);
+            await window.refreshLiveScanPage();
+        }
+        window.recoverMission = recoverMission;
+        window.retryTask = retryTask;
+        window.skipTask = skipTask;
+
+        // ── Mission Execution / Timeouts settings ────────────────────────────
+        function toDisplay(ms, unit) {
+            if (unit === 'count') return String(ms);
+            if (unit === 'minutes') return String(ms / 60000);
+            return String(ms / 1000); // seconds
+        }
+        function toMs(v, unit) {
+            const n = Number(v);
+            if (!Number.isFinite(n)) return NaN;
+            if (unit === 'count') return Math.round(n);
+            if (unit === 'minutes') return Math.round(n * 60000);
+            return Math.round(n * 1000);
+        }
+        async function loadTimeouts() {
+            const host = document.getElementById('timeoutsList');
+            if (!host) return;
+            const data = await T3MP3ST_API.get('/api/settings/timeouts');
+            if (!data || !Array.isArray(data.settings)) { host.innerHTML = '<div style="color:#ff4444;font-size:12px;">Failed to load timeouts.</div>'; return; }
+            host.innerHTML = data.settings.map(s => {
+                const srcBadge = s.source === 'ui'
+                    ? '<span style="background:#00aaff;color:#000;padding:1px 6px;border-radius:4px;font-size:10px;">UI OVERRIDE</span>'
+                    : s.source === 'env'
+                        ? `<span style="background:#ffaa00;color:#000;padding:1px 6px;border-radius:4px;font-size:10px;">ENV (${s.envVar})</span>`
+                        : '<span style="background:var(--bg-primary);color:var(--text-muted);padding:1px 6px;border-radius:4px;font-size:10px;">default</span>';
+                const envNote = s.envOverridden ? `<span style="color:#ffaa00;font-size:10px;" title="An environment value exists but is overridden by the UI value">env overridden</span>` : '';
+                return `
+                  <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;padding:10px;border:1px solid var(--border-color);border-radius:6px;background:var(--bg-primary);">
+                    <div style="flex:1;min-width:0;">
+                      <div style="font-weight:600;font-size:13px;">${liveScanEscape(s.label)} ${srcBadge} ${envNote}</div>
+                      <div style="font-size:11px;color:var(--text-muted);">${liveScanEscape(s.blurb)}</div>
+                      <div style="font-size:10px;color:var(--text-muted);margin-top:3px;">default: <b>${s.default}</b> · range ${toDisplay(s.minMs, s.unit)}–${toDisplay(s.maxMs, s.unit)} ${s.unit}${s.restartRequired ? ' · applies to new dispatches' : ''}</div>
+                    </div>
+                    <div style="display:flex;gap:6px;align-items:center;flex-shrink:0;">
+                      <input type="number" step="any" class="form-input" style="width:90px;padding:5px;" id="to_${s.key}" value="${toDisplay(s.valueMs, s.unit)}" />
+                      <span style="font-size:11px;color:var(--text-muted);">${s.unit}</span>
+                      <button class="action-btn" onclick="saveTimeout('${s.key}','${s.unit}')">Save</button>
+                      <button class="action-btn" style="background:var(--bg-tertiary,#333);" onclick="resetTimeout('${s.key}')" title="Remove the UI override — env/default precedence resumes">Reset</button>
+                    </div>
+                  </div>`;
+            }).join('');
+            if (Array.isArray(data.conflicts) && data.conflicts.length) {
+                host.insertAdjacentHTML('beforeend', `<div style="color:#ff4444;font-size:11px;margin-top:8px;">⚠ ${data.conflicts.map(c => liveScanEscape(c.message)).join('<br>')}</div>`);
+            }
+        }
+        async function saveTimeout(key, unit) {
+            const el = document.getElementById('to_' + key);
+            const ms = toMs(el.value, unit);
+            const r = await T3MP3ST_API.post('/api/settings/timeouts', { key, valueMs: ms });
+            if (!r || r.error) { alert(`Invalid value: ${(r && r.error) || 'check bounds + hierarchy'}`); return; }
+            await loadTimeouts();
+        }
+        async function resetTimeout(key) {
+            await T3MP3ST_API.post('/api/settings/timeouts', { key, valueMs: null });
+            await loadTimeouts();
+        }
+        async function resetAllTimeouts() {
+            if (!confirm('Reset ALL timeout overrides? Environment/default values resume precedence.')) return;
+            await T3MP3ST_API.post('/api/settings/timeouts', { reset: true });
+            await loadTimeouts();
+        }
+        window.loadTimeouts = loadTimeouts;
+        window.saveTimeout = saveTimeout;
+        window.resetTimeout = resetTimeout;
+        window.resetAllTimeouts = resetAllTimeouts;
+
+        function renderStallRecovery(status) {
+            const host = document.getElementById('stallRecoveryPanel');
+            if (!host) return;
+            const isStalled = Boolean(status.stallReason);
+            if (!isStalled) { host.style.display = 'none'; host.innerHTML = ''; return; }
+            host.style.display = 'block';
+            const tasks = Array.isArray(status.tasks) ? status.tasks : [];
+            const blocking = new Set(status.blockingTaskIds || []);
+            const retryable = new Set(status.retryableTaskIds || []);
+            const stalledSince = status.stallSince ? new Date(status.stallSince).toLocaleTimeString() : '';
+            const rows = tasks.filter(t => t.status === 'failed').map(t => {
+                const isReq = t.required !== false;
+                const isBlocking = blocking.has(t.id);
+                const canRetry = retryable.has(t.id);
+                const canSkip = !isReq && t.status === 'failed';
+                const attempts = t.attempts ?? 0;
+                return `
+                  <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:8px;border:1px solid var(--border-color);border-radius:6px;margin-bottom:6px;background:var(--bg-primary);">
+                    <div style="flex:1;min-width:0;">
+                      <div style="font-weight:600;">${liveScanEscape(t.name)} ${isReq ? '<span style="color:#ff4444;font-size:10px;">REQUIRED</span>' : '<span style="color:#00aaff;font-size:10px;">optional</span>'}</div>
+                      <div style="font-size:11px;color:var(--text-muted);overflow-wrap:anywhere;">${liveScanEscape(t.result?.error || '')} · ${attempts} attempt(s)</div>
+                    </div>
+                    <div style="display:flex;gap:6px;flex-shrink:0;">
+                      ${canRetry ? `<button class="action-btn" style="background:#ffaa00;color:#000;" onclick="window.retryTask('${t.id}')">Retry</button>` : ''}
+                      ${canSkip ? `<button class="action-btn" style="background:#00aaff;color:#000;" onclick="window.skipTask('${t.id}')">Skip</button>` : ''}
+                      ${isBlocking && !canRetry && !canSkip ? '<span style="font-size:11px;color:#ff4444;">blocked</span>' : ''}
+                    </div>
+                  </div>`;
+            }).join('');
+            host.innerHTML = `
+              <div style="border:1px solid #ff4444;border-radius:8px;padding:14px;background:rgba(255,68,68,0.06);">
+                <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+                  <div style="color:#ff4444;font-weight:700;">⚠ MISSION STALLED</div>
+                  <div style="font-size:11px;color:var(--text-muted);">since ${stalledSince}</div>
+                </div>
+                <div style="font-size:12px;color:var(--text-secondary);margin-bottom:10px;">${liveScanEscape(status.stallReason)}</div>
+                ${status.lastRecoveryAction ? `<div style="font-size:11px;color:var(--text-muted);margin-bottom:8px;">Last action: ${liveScanEscape(status.lastRecoveryAction)}</div>` : ''}
+                ${rows || '<div style="font-size:12px;color:var(--text-muted);">No failed tasks in view — try Resume to re-evaluate.</div>'}
+                <div style="display:flex;gap:8px;margin-top:10px;">
+                  <button class="action-btn" style="background:#00ff88;color:#000;" onclick="window.recoverMission()">Resume</button>
+                  <button class="action-btn" style="background:#ff4444;color:#fff;" onclick="abortMission()">Abort Mission</button>
+                </div>
+                <div style="font-size:10px;color:var(--text-muted);margin-top:8px;">Resume re-evaluates required task state and refuses while blockers remain — it never fabricates success or bypasses approvals/scope.</div>
+              </div>`;
+        }
+
         window.clearLiveScanFeed = function clearLiveScanFeed() {
             LiveScanState.events = [];
             LiveScanState.seen = new Set();
@@ -7466,8 +7622,14 @@ Correlating findings across agents, identifying patterns, producing actionable i
 
             const summary = document.getElementById('liveScanSummary');
             if (summary) {
+                // Truthful derived state — 'active' alone never means "LIVE probing". Prefer the
+                // server's complete state model; fall back to client derivation for older payloads.
+                const derivedState = status.state || (
+                    status.stallReason ? 'stalled' : status.paused ? 'paused' : active ? 'running' : 'idle'
+                );
+                const stateColor = { running: '#00ff88', paused: '#ffaa00', stalled: '#ff4444', completed: '#00aaff', aborted: '#888', idle: '#888' }[derivedState] || '#ffaa00';
                 const cells = [
-                    ['State', status.paused ? 'Paused' : (active ? 'Running' : 'Stopped'), active ? '#00ff88' : '#ffaa00'],
+                    ['State', derivedState.toUpperCase(), stateColor],
                     ['Phase', currentPhase, '#00aaff'],
                     ['Progress', progress, '#00ff88'],
                     ['Operators', String(operatorSummary.total ?? operators.length ?? 0), '#ffaa00'],
@@ -7481,6 +7643,9 @@ Correlating findings across agents, identifying patterns, producing actionable i
                     </div>
                 `).join('');
             }
+
+            // Stalled-mission recovery panel: show blockers + Retry / Resume / Abort / Skip actions.
+            renderStallRecovery(status);
 
             const opCount = document.getElementById('liveScanOperatorCount');
             if (opCount) opCount.textContent = `${operatorSummary.busy ?? operators.filter(op => ['tasked', 'executing'].includes(op.status)).length ?? 0} busy`;
@@ -7694,6 +7859,7 @@ Correlating findings across agents, identifying patterns, producing actionable i
             if (page === 'evidence' && typeof window.hydrateFindings === 'function') setTimeout(window.hydrateFindings, 60);
             if (page === 'selfimprove' && typeof window.renderSelfImprove === 'function') setTimeout(window.renderSelfImprove, 60);
             if (page === 'settings' && typeof window.uacInit === 'function') setTimeout(window.uacInit, 40);
+            if (page === 'settings' && typeof window.loadTimeouts === 'function') setTimeout(window.loadTimeouts, 60);
         }
 
         document.querySelectorAll('.nav-item').forEach(i => i.addEventListener('click', () => navigateTo(i.dataset.page)));

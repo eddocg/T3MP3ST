@@ -12,6 +12,7 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { promisify } from 'util';
 import * as net from 'net';
+import { config } from '../config/index.js';
 import * as dns from 'dns';
 import * as tls from 'tls';
 import { ApprovalController, isGatedRisk, type ApprovalRequest } from './approval.js';
@@ -3374,7 +3375,9 @@ export async function runSubprocess(
   args: string[],
   options?: { timeout?: number; maxOutput?: number }
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-  const timeout = options?.timeout ?? 60000;
+  // Consolidated timeout model: caller-specified per-tool timeout wins; otherwise the operator's
+  // toolExecTimeoutMs (UI > env > default) is the global default. Never 0/infinite.
+  const timeout = options?.timeout ?? config.getTimeout('toolExecTimeoutMs').valueMs;
   const maxOutput = options?.maxOutput ?? 1024 * 1024; // 1MB
 
   try {

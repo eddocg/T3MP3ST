@@ -10,6 +10,12 @@ import { homedir } from 'os';
 import { join } from 'path';
 import { existsSync, readFileSync, writeFileSync } from 'fs';
 import type { LLMProvider, LLMConfig, FallbackEntry, OpsecLevel } from '../types/index.js';
+import {
+  TIMEOUT_REGISTRY,
+  resolveTimeout,
+  validateTimeoutValue,
+  validateTimeoutHierarchy,
+} from './timeouts.js';
 
 type ApiKeyProvider = 'openrouter' | 'venice' | 'anthropic' | 'openai' | 'xai' | 'gemini' | 'litellm' | 'deepseek' | 'huggingface' | 'nanogpt' | 'local';
 
@@ -127,6 +133,14 @@ export interface TempestSettings {
   // Outbound SOCKS5 proxy for test/attack traffic (socks5://[user:pass@]host:port).
   // Empty/unset = egress from the operator's own IP. See src/net/proxy.ts.
   proxyUrl?: string;
+
+  /**
+   * Operator overrides for the consolidated mission-execution timeout model (see
+   * src/config/timeouts.ts). Maps a TimeoutSpec.key to a MILLISECOND value. Only keys the operator
+   * explicitly set are present — reset REMOVES the key so env/default precedence resumes. Never
+   * stores secrets; never touches ScopeGuard/approvals (Class-C invariants are not in the registry).
+   */
+  timeouts?: Record<string, number>;
 }
 
 // =============================================================================
@@ -810,6 +824,52 @@ class ConfigManager {
     this.config.set('proxyUrl', (url || '').trim());
   }
 
+  // ── Mission-execution timeout overrides (consolidated model: src/config/timeouts.ts) ──
+
+  /**
+   * Resolve the effective value for a timeout key with precedence UI override > env > default.
+   * Returns the clamped value + its source for honest display.
+   */
+  getTimeout(key: string): { valueMs: number; source: 'ui' | 'env' | 'default'; envPresent: boolean } {
+    const ui = this.config.get('timeouts')?.[key];
+    return resolveTimeout(key, ui);
+  }
+
+  /**
+   * Persist a UI override for a timeout key after validating bounds + the parent/child hierarchy
+   * against the resulting effective set. Throws on invalid value or hierarchy conflict.
+   */
+  setTimeout(key: string, ms: number): void {
+    const check = validateTimeoutValue(key, ms);
+    if (!check.ok) throw new Error(check.error);
+    const next = { ...(this.config.get('timeouts') ?? {}), [key]: check.clamped };
+    // Hierarchy check against the EFFECTIVE values that would result.
+    const effective: Record<string, number> = {};
+    for (const spec of TIMEOUT_REGISTRY) {
+      effective[spec.key] = resolveTimeout(spec.key, next[spec.key]).valueMs;
+    }
+    const conflicts = validateTimeoutHierarchy(effective);
+    if (conflicts.length > 0) {
+      throw new Error(`Timeout conflict: ${conflicts.map((c) => c.message).join(' | ')}`);
+    }
+    this.config.set('timeouts', next);
+  }
+
+  /**
+   * Remove a UI override so env/default precedence resumes. This is the honest "reset": it deletes
+   * the key rather than persisting the default as a new UI override.
+   */
+  resetTimeout(key: string): void {
+    const cur = { ...(this.config.get('timeouts') ?? {}) };
+    delete cur[key];
+    this.config.set('timeouts', cur);
+  }
+
+  /** Remove ALL timeout UI overrides (env/default precedence resumes for every key). */
+  resetTimeouts(): void {
+    this.config.set('timeouts', {});
+  }
+
   /**
    * Get an API key for a provider
    */
@@ -1033,7 +1093,9 @@ class ConfigManager {
               ? parsed
               : Math.max(Number(this.config.get('timeout')) || 0, 120000);
           })()
-        : this.config.get('timeout'),
+        // Consolidated model: the cloud LLM response timeout resolves UI > (no env) > default.
+        // The operator-facing Settings value is authoritative over the legacy static 'timeout'.
+        : (this.config.get('timeouts')?.llmTimeoutMs ?? this.config.get('timeout')),
       fallbackChain: this.buildFallbackChain(actualProvider),
     };
   }

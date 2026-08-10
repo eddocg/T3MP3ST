@@ -377,6 +377,17 @@ export type MissionObjectiveOutcome =
   | 'met'
   | 'exhausted';
 
+/**
+ * Complete derived mission/execution state for status + UI. NOT collapsed to "active means live".
+ *  - idle:      no TempestCommand / no active mission (standby)
+ *  - running:   active, not paused, no unresolved stall
+ *  - paused:    operator-paused (paused=true, no stallReason)
+ *  - stalled:   active:true AND paused:true AND stallReason set (blocked on failed required work)
+ *  - completed: mission reached terminal success
+ *  - aborted:   explicitly stopped/aborted by the operator (terminal, distinct from completed)
+ */
+export type MissionRunState = 'idle' | 'running' | 'paused' | 'stalled' | 'completed' | 'aborted';
+
 export interface RulesOfEngagement {
   scope: string[];
   excludedTargets: string[];
@@ -385,6 +396,21 @@ export interface RulesOfEngagement {
   maxDetectionEvents: number;
   requireManualApproval: string[];
   timeWindow?: { start: number; end: number };
+}
+
+/**
+ * One execution attempt of a task. Retries are NEW attempts appended here — the prior
+ * timed-out/failed attempt is preserved verbatim for audit; history is never rewritten.
+ */
+export interface TaskAttempt {
+  attemptId: string;
+  /** 1-based attempt number. */
+  n: number;
+  startedAt: number;
+  endedAt?: number;
+  /** terminal outcome of THIS attempt only. */
+  outcome: 'completed' | 'failed' | 'timeout' | 'timeout_late_success' | 'timeout_pending';
+  error?: string;
 }
 
 export interface Task {
@@ -402,6 +428,14 @@ export interface Task {
   createdAt: number;
   startedAt?: number;
   completedAt?: number;
+  /**
+   * Whether this task blocks phase advancement. Required (default true) tasks stall the mission on
+   * failure and are NEVER skippable. Optional tasks may be explicitly skipped (terminal 'skipped',
+   * never rewritten to 'completed'). Defaulted to true at creation; legacy tasks stay required.
+   */
+  required?: boolean;
+  /** Immutable attempt history — attempt 1 failure/timeout stays visible after a retry. */
+  attempts?: TaskAttempt[];
 }
 
 export interface TaskResult {
@@ -685,6 +719,12 @@ export interface CommandEvents {
   'command:stopped': void;
   'command:paused': void;
   'command:resumed': void;
+  /** Resume was refused because required blockers remain (recovery gate). */
+  'command:resume-refused': { blocking: Array<{ id: string; name: string; detail: string }>; note: string };
+  /** A failed task was requeued as a new attempt. */
+  'command:task-retried': { taskId: string };
+  /** An optional failed task was explicitly skipped (terminal, not completed). */
+  'command:task-skipped': { taskId: string };
   'tick': number;
   'operator:spawned': { id: string; archetype: OperatorArchetype };
   'operator:burned': { id: string };
