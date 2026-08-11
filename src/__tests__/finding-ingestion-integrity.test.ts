@@ -217,8 +217,139 @@ describe('P2 — structured OperatorAgent dispositions drive task state', () => 
   });
 
   it('the agent prompt contract documents the outcome field and its semantics', () => {
-    expect(AGENT_SRC).toContain('"outcome":"completed|blocked|no_eligible_work|failed"');
+    expect(AGENT_SRC).toContain('"outcome":"completed|partial|blocked|no_eligible_work|failed"');
     expect(AGENT_SRC).toContain('returning normally is NOT treated as success');
+  });
+
+  // ── P1 (runtime-truth II): EXECUTION ≠ COVERAGE — the partial disposition ──
+
+  it('a task that EXECUTED valid tools but cannot satisfy one required sub-objective is PARTIAL — not blocked, not completed', async () => {
+    const arsenal = new Arsenal();
+    // Several valid tools actually execute (real coverage)…
+    arsenal.register({
+      name: 'probe_ok',
+      description: 'works',
+      category: 'test',
+      parameters: [],
+      handler: async () => ({ success: true, output: 'probe result data' }),
+    });
+    const toolCalls = (n: number) => Array.from({ length: n }, (_, i) => ({
+      id: `c${i}`, name: 'probe_ok', arguments: {},
+    }));
+    // …then the operator honestly declares a required sub-objective unsatisfied.
+    const debrief =
+      'Executed the baseline requests (inherit + none) across the route set, but the credential-differential sub-objective could not be verified: the target returned identical responses for both contexts.\n' +
+      '```json\n{"findings":[],"outcome":"partial","outcomeReason":"authenticated-vs-unauthenticated differential unverifiable — identical responses on 3/3 routes"}\n```';
+    const agent = createAgentLoop(
+      createMockLLM([makeLLMResponse(toolCalls(3)), makeLLMResponse([], debrief)]),
+      arsenal,
+      { maxIterations: 6 },
+    );
+    const result = await agent.run(makeTask(), 'Execute the task.');
+    expect(result.steps.some((s) => s.type === 'tool_call')).toBe(true); // work really ran
+    expect(result.disposition).toBe('partial');
+    expect(result.dispositionReason).toContain('differential unverifiable');
+    expect(result.success).toBe(true); // executed — NOT blocked, NOT failed
+  });
+
+  it('dispatcher mapping: partial disposition → task COMPLETED with disposition partial (never blocked), attempt history notes the coverage gap', () => {
+    const mc = new MissionControl();
+    const mission = mc.createMission({
+      name: 'Partial Test',
+      objectives: ['broad coverage'],
+      objectiveClass: 'general',
+      phases: [KillChainPhase.RECON],
+    });
+    const tq = mc.getTaskQueue();
+    const task: Task = {
+      id: 'task-partial-1',
+      missionId: mission.id,
+      name: 'Web Application Security Testing',
+      description: 'broad web testing',
+      phase: KillChainPhase.RECON,
+      operatorType: 'scanner',
+      status: 'pending',
+      priority: 5,
+      dependencies: [],
+      createdAt: Date.now(),
+    };
+    tq.add(task);
+    tq.updateStatus(task.id, 'in_progress');
+    // What the TempestCommand dispatcher does with result.disposition === 'partial': the task
+    // EXECUTED, so it completes — carrying the partial disposition in the stored result.
+    const result: Task['result'] = {
+      success: true,
+      output: 'ran 6 probes; one required sub-objective unverified',
+      disposition: 'partial',
+      dispositionReason: 'could not verify exploitability of the CORS reflection',
+    };
+    tq.complete(task.id, result);
+    tq.recordAttempt(task.id, 'completed', 'partial coverage: could not verify exploitability of the CORS reflection');
+    const stored = tq.getForMission(mission.id).find((t) => t.id === task.id)!;
+    expect(stored.status).toBe('completed'); // executed — not blocked
+    expect(stored.result?.disposition).toBe('partial');
+    expect(stored.attempts?.at(-1)?.outcome).toBe('completed');
+    expect(stored.attempts?.at(-1)?.error).toContain('partial coverage');
+  });
+
+  it('mission outcome: partial task coverage degrades general outcome to partial and names the unverified sub-objective', () => {
+    const mc = new MissionControl();
+    const mission = mc.createMission({
+      name: 'Partial Coverage Mission',
+      objectives: ['broad coverage'],
+      objectiveClass: 'general',
+      phases: [KillChainPhase.RECON],
+    });
+    const tq = mc.getTaskQueue();
+    const mk = (id: string, name: string): Task => ({
+      id, missionId: mission.id, name, description: '', phase: KillChainPhase.RECON,
+      operatorType: 'recon', status: 'pending', priority: 5, dependencies: [], createdAt: Date.now(),
+    });
+    const full = mk('task-full-1', 'Broad recon');
+    const partial = mk('task-partial-2', 'Web Application Security Testing');
+    tq.add(full);
+    tq.add(partial);
+    tq.complete(full.id, { success: true, output: 'done', disposition: 'completed' });
+    tq.complete(partial.id, {
+      success: true, output: 'executed', disposition: 'partial',
+      dispositionReason: 'exploit confirmation sub-objective unverified',
+    });
+    mc.recordPhaseDisposition(mission.id);
+    // Phase truth: partial work RAN — the phase is executed, not blocked/no_eligible_work.
+    const disp = mc.getMission(mission.id)!.phaseDispositions!.find((d) => d.phase === KillChainPhase.RECON)!;
+    expect(disp.disposition).toBe('executed');
+    const completion = deriveObjectiveCompletion(
+      { ...mc.getMission(mission.id)! },
+      tq.getForMission(mission.id),
+    );
+    expect(completion.outcome).toBe('partial');
+    expect(completion.reason).toContain('PARTIAL coverage');
+    expect(completion.reason).toContain('Web Application Security Testing');
+    expect(completion.reason).toContain('exploit confirmation sub-objective unverified');
+  });
+
+  it('a fully-completed mission (no partial/blocked/failed) still reaches met — partial semantics do not degrade clean runs', () => {
+    const mc = new MissionControl();
+    const mission = mc.createMission({
+      name: 'Clean Mission',
+      objectives: ['broad coverage'],
+      objectiveClass: 'general',
+      phases: [KillChainPhase.RECON],
+    });
+    const tq = mc.getTaskQueue();
+    const task: Task = {
+      id: 'task-clean-1', missionId: mission.id, name: 'Recon', description: '',
+      phase: KillChainPhase.RECON, operatorType: 'recon', status: 'pending',
+      priority: 5, dependencies: [], createdAt: Date.now(),
+    };
+    tq.add(task);
+    tq.complete(task.id, { success: true, output: 'done', disposition: 'completed' });
+    mc.recordPhaseDisposition(mission.id);
+    const completion = deriveObjectiveCompletion(
+      { ...mc.getMission(mission.id)! },
+      tq.getForMission(mission.id),
+    );
+    expect(completion.outcome).toBe('met');
   });
 });
 

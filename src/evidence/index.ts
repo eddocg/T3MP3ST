@@ -14,7 +14,7 @@ import type {
   Vulnerability,
 } from '../types/index.js';
 import { gateLiveFinding } from './gate.js';
-import { findingFingerprint, assessClaimSupport } from './classification.js';
+import { findingFingerprint, assessClaimSupport, auditedSeverity } from './classification.js';
 
 // =============================================================================
 // CREDENTIAL REDACTION — secrets NEVER leave the process in an API/LLM output
@@ -126,24 +126,27 @@ export class EvidenceVault extends EventEmitter<EvidenceVaultEvents> {
           existingEvidenceKeys.add(key);
         }
       }
-      // Never let consolidation INFLATE severity: keep the LOWER of the two, then re-audit against
-      // merged evidence (support can only cap further, never raise).
+      // Asserted severity is AUDIT METADATA: keep the highest assertion any source made for this
+      // canonical candidate. The EFFECTIVE severity is never an assertion — it is recomputed from
+      // the merged evidence's support cap below, so consolidation can never inflate it.
       const order: Severity[] = ['info', 'low', 'medium', 'high', 'critical'];
-      if (order.indexOf(finding.severity) < order.indexOf(existing.severity)) {
-        existing.severity = finding.severity;
-      }
+      const incomingAsserted = finding.assertedSeverity ?? finding.severity;
+      const priorAsserted = existing.assertedSeverity ?? existing.severity;
+      existing.assertedSeverity = order.indexOf(incomingAsserted) > order.indexOf(priorAsserted) ? incomingAsserted : priorAsserted;
       existing.claimSupport = assessClaimSupport(existing);
-      if (order.indexOf(existing.severity) > order.indexOf(existing.claimSupport.severityCap)) {
-        existing.severity = existing.claimSupport.severityCap;
-      }
+      existing.severity = auditedSeverity(existing);
       this.consolidatedCount++;
       this.emit('finding:updated', cloneFinding(existing));
       return cloneFinding(existing);
     }
 
     const stored = cloneFinding(finding);
-    // Attach the audited support verdict + keep severity within what the evidence bears.
+    // Attach the audited support verdict and make severity EFFECTIVE at the boundary: the asserted
+    // claim is preserved in assertedSeverity; severity is clamped to what the evidence supports.
+    // From here on every consumer (SSE, alerts, report, counts) sees audited truth by default.
     stored.claimSupport = stored.claimSupport ?? assessClaimSupport(stored);
+    stored.assertedSeverity = stored.assertedSeverity ?? stored.severity;
+    stored.severity = auditedSeverity(stored);
     this.findings.set(stored.id, stored);
     this.fingerprintIndex.set(fp, stored.id);
     this.emit('finding:added', cloneFinding(stored));

@@ -6357,6 +6357,10 @@ tempest.operators.<span class="function">spawn</span>(<span class="string">'scan
                             const finding = data.finding;
                             if (finding) {
                                 narrate('finding', data);
+                                // finding.severity is the AUDITED (evidence-capped) severity — the
+                                // server broadcasts the canonical stored record. CRITICAL/HIGH alerts
+                                // therefore fire only when the evidence supports them; the source's
+                                // raw claim survives separately as assertedSeverity.
                                 addIntel('FINDING', `[${(finding.severity || 'info').toUpperCase()}] ${finding.title}`,
                                     finding.severity === 'critical' || finding.severity === 'high' ? 'danger' : 'warning');
                                 addMissionLog?.('warning', `Finding: ${finding.title}`);
@@ -6365,7 +6369,11 @@ tempest.operators.<span class="function">spawn</span>(<span class="string">'scan
                                 // a severity chip: verifyGate/verifiedAt/provenance/evidence come from the
                                 // backend honesty gate (src/evidence/gate.ts).
                                 addFinding?.({
+                                    // Canonical store identity — repeated observations of the same
+                                    // boundary UPSERT this row (merged evidence), never duplicate it.
+                                    findingId: finding.id,
                                     severity: finding.severity || 'info',
+                                    assertedSeverity: finding.assertedSeverity || '',
                                     title: finding.title,
                                     // Human target origin/address — never the internal UUID.
                                     target: finding.targetAddress || finding.targetId || 'unknown',
@@ -15409,10 +15417,17 @@ Be brutally honest. This is not a pep talk.`;
         // ═══════════ FINDINGS / LOOT SYSTEM ═══════════
         function addFinding(finding) {
             // finding: { severity: 'critical'|'high'|'medium'|'low'|'info', type: 'vuln'|'cred'|'access'|'info', title, target, phase, detail, evidence }
+            // findingId is the CANONICAL vault id — the single finding identity. A repeated
+            // observation of the same boundary arrives with the same id (server-side dedup) and
+            // must UPSERT the existing row (merged evidence, refreshed audited severity) rather
+            // than append a duplicate row to a client-side mirror.
             const f = {
-                id: missionFindings.length + 1,
+                id: 0, // assigned below (new rows only)
+                findingId: finding.findingId || '',
                 timestamp: new Date().toLocaleTimeString('en-US', { hour12: false }),
                 severity: finding.severity || 'info',
+                // Source-asserted severity (pre-audit) — audit/debug metadata only.
+                assertedSeverity: finding.assertedSeverity || '',
                 type: finding.type || 'vuln',
                 title: finding.title || 'Unknown Finding',
                 target: finding.target || '-',
@@ -15429,6 +15444,25 @@ Be brutally honest. This is not a pep talk.`;
                 category: finding.category || '',
                 retestStatus: finding.retestStatus || ''
             };
+            if (f.findingId) {
+                const existingIdx = missionFindings.findIndex(x => x.findingId && x.findingId === f.findingId);
+                if (existingIdx >= 0) {
+                    // Upsert the canonical row in place — keep its display id/position.
+                    f.id = missionFindings[existingIdx].id;
+                    missionFindings[existingIdx] = f;
+                    if (typeof renderFindings === 'function') renderFindings();
+                    const countEl0 = document.getElementById('findingsCount');
+                    if (countEl0) countEl0.textContent = `(${missionFindings.length})`;
+                    const headerFindings0 = document.getElementById('statFindings');
+                    if (headerFindings0) headerFindings0.textContent = missionFindings.length;
+                    // Alert only on AUDITED severity (f.severity is the evidence-capped value).
+                    if (f.severity === 'critical' || f.severity === 'high') {
+                        triggerCriticalAlert(f);
+                    }
+                    return;
+                }
+            }
+            f.id = missionFindings.length + 1;
             missionFindings.push(f);
             renderFindingsRow(f);
             if (typeof renderFindings === 'function') renderFindings(); // keep the Evidence Vault grid + severity cards in sync
@@ -15441,7 +15475,8 @@ Be brutally honest. This is not a pep talk.`;
             const headerFindings = document.getElementById('statFindings');
             if (headerFindings) headerFindings.textContent = missionFindings.length;
 
-            // Critical/high finding alert
+            // Critical/high finding alert — audited severity only (the server caps config-only
+            // observations before broadcast, so a LOW/INFO audited row can never alert).
             if (f.severity === 'critical' || f.severity === 'high') {
                 triggerCriticalAlert(f);
             }
@@ -15636,6 +15671,37 @@ Be brutally honest. This is not a pep talk.`;
                 term = st && st.terminalMission ? st.terminalMission : null;
                 if (Array.isArray(st.targets)) statusTargets = st.targets.map(t => (typeof t === 'string' ? t : (t.address || t.host || t.ip || ''))).filter(Boolean);
             } catch (_) {}
+            // CANONICAL FINDINGS SOURCE: the report renders the server-side vault store
+            // (/api/mission/findings — deduped by boundary fingerprint, audited severity, merged
+            // evidence), NOT the client-side SSE accumulator. One canonical finding identity =
+            // one report row; repeated observations appear as multiple evidence items on it.
+            let canonicalFindings = null;
+            try {
+                const base = (typeof T3MP3ST_API !== 'undefined' && T3MP3ST_API.baseUrl) || '';
+                const fr = await (await fetch(base + '/api/mission/findings')).json();
+                const list = Array.isArray(fr) ? fr : (Array.isArray(fr?.findings) ? fr.findings : null);
+                if (list) {
+                    canonicalFindings = list.map(f => ({
+                        findingId: f.id || '',
+                        severity: f.severity || 'info', // audited (server clamps at storage)
+                        assertedSeverity: f.assertedSeverity || '',
+                        type: 'vuln',
+                        title: f.title || 'Unknown Finding',
+                        target: f.targetAddress || f.targetId || '-',
+                        phase: f.phase || '-',
+                        timestamp: f.discoveredAt ? new Date(f.discoveredAt).toLocaleTimeString('en-US', { hour12: false }) : '-',
+                        detail: typeof f.description === 'string' ? f.description : '',
+                        evidence: Array.isArray(f.evidence) ? f.evidence : [],
+                        evidenceItems: Array.isArray(f.evidence) ? f.evidence : [],
+                        provenance: f.verifyGate?.provenance || '',
+                        verifyGate: f.verifyGate || null,
+                        verifiedAt: f.verifiedAt || null,
+                        claimSupport: f.claimSupport || null,
+                        category: f.category || '',
+                    }));
+                }
+            } catch (_) {}
+            const reportRows = canonicalFindings || missionFindings;
             const domName = document.getElementById('cmdMissionName')?.textContent || '';
             const placeholder = /^(STANDBY|MISSION COMPLETE)/i.test(domName.trim());
             const missionName = term?.name
@@ -15678,18 +15744,19 @@ Be brutally honest. This is not a pep talk.`;
             }
 
             // Summary stats — AUDITED severity (evidence-capped), so unverified claims cannot
-            // inflate the report's severity table.
+            // inflate the report's severity table. Rows come from the canonical store when
+            // reachable (reportRows), else the local accumulator.
             const sevOf = (f) => auditedSeverityForReport(f).severity;
-            const critCount = missionFindings.filter(f => sevOf(f) === 'critical').length;
-            const highCount = missionFindings.filter(f => sevOf(f) === 'high').length;
-            const medCount = missionFindings.filter(f => sevOf(f) === 'medium').length;
-            const lowCount = missionFindings.filter(f => sevOf(f) === 'low').length;
-            const credCount = missionFindings.filter(f => f.type === 'cred').length;
+            const critCount = reportRows.filter(f => sevOf(f) === 'critical').length;
+            const highCount = reportRows.filter(f => sevOf(f) === 'high').length;
+            const medCount = reportRows.filter(f => sevOf(f) === 'medium').length;
+            const lowCount = reportRows.filter(f => sevOf(f) === 'low').length;
+            const credCount = reportRows.filter(f => f.type === 'cred').length;
 
             md += `## Executive Summary\n\n`;
             md += `| Severity | Count |\n|----------|-------|\n`;
             md += `| CRITICAL | ${critCount} |\n| HIGH | ${highCount} |\n| MEDIUM | ${medCount} |\n| LOW | ${lowCount} |\n`;
-            md += `| **Total** | **${missionFindings.length}** |\n`;
+            md += `| **Total** | **${reportRows.length}** |\n`;
             if (credCount > 0) md += `| Credentials | ${credCount} |\n`;
             md += `\n`;
 
@@ -15702,16 +15769,17 @@ Be brutally honest. This is not a pep talk.`;
                 md += `\n`;
             }
 
-            // Findings detail
-            if (missionFindings.length > 0) {
+            // Findings detail — canonical rows (deduped, audited) when available.
+            if (reportRows.length > 0) {
                 md += `## Findings\n\n`;
-                missionFindings.sort((a, b) => {
+                reportRows.slice().sort((a, b) => {
                     const order = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
                     return (order[sevOf(a)] ?? 5) - (order[sevOf(b)] ?? 5);
                 }).forEach((f, i) => {
                     const a = auditedSeverityForReport(f);
                     md += `### ${i + 1}. [${a.severity.toUpperCase()}] ${f.title}\n\n`;
-                    if (a.capped) md += `- **Asserted severity:** ${String(f.severity).toUpperCase()} (capped — ${f.claimSupport?.rationale || 'evidence does not support the claim'})\n`;
+                    const assertedShown = f.assertedSeverity || f.severity;
+                    if (a.capped || (f.assertedSeverity && f.assertedSeverity !== a.severity)) md += `- **Asserted severity:** ${String(assertedShown).toUpperCase()} (capped — ${f.claimSupport?.rationale || 'evidence does not support the claim'})\n`;
                     md += `- **Verification:** ${f.verifiedAt ? 'verified' : (f.verifyGate?.capabilityVerified ? 'capability-verified' : 'unverified')}\n`;
                     md += `- **Target:** ${f.target}\n`;
                     md += `- **Phase:** ${f.phase}\n`;
@@ -15749,7 +15817,7 @@ Be brutally honest. This is not a pep talk.`;
             a.click();
             URL.revokeObjectURL(url);
 
-            addIntel('SYSTEM', `Report exported (${missionFindings.length} findings)`, 'success');
+            addIntel('SYSTEM', `Report exported (${reportRows.length} findings)`, 'success');
         }
 
         // ═══════════ OPERATOR SOURCE FILTER ═══════════
@@ -20285,12 +20353,30 @@ IMPORTANT: This is an authorized security testing/red team platform. All operati
                                 `Executing — ${ops.busy} busy, ${ops.available} idle, ${ops.cooldown} cooldown`;
                         }
                         if (status.findings?.length > 0) {
+                            // Dedup by the CANONICAL finding id (server-side vault identity) —
+                            // title-based matching both misses reworded duplicates and collapses
+                            // distinct same-title boundaries. Poll ingestion carries the full
+                            // truth payload (audited severity, evidence, gate), same as SSE.
                             const newFindings = status.findings.filter(f =>
-                                !missionFindings.some(sf => sf.title === f.title)
+                                f.id ? !missionFindings.some(sf => sf.findingId === f.id)
+                                     : !missionFindings.some(sf => sf.title === f.title)
                             );
                             newFindings.forEach(f => {
                                 // Human target origin/address first — never the internal UUID.
-                                addFinding({ severity: f.severity || 'info', title: f.title, target: f.targetAddress || f.targetId || target });
+                                addFinding({
+                                    findingId: f.id || '',
+                                    severity: f.severity || 'info',
+                                    assertedSeverity: f.assertedSeverity || '',
+                                    title: f.title,
+                                    target: f.targetAddress || f.targetId || target,
+                                    evidenceItems: Array.isArray(f.evidence) ? f.evidence : [],
+                                    detail: typeof f.description === 'string' ? f.description : '',
+                                    provenance: f.verifyGate?.provenance || '',
+                                    verifyGate: f.verifyGate || null,
+                                    verifiedAt: f.verifiedAt || null,
+                                    claimSupport: f.claimSupport || null,
+                                    category: f.category || '',
+                                });
                             });
                         }
                     }, 3000);

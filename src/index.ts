@@ -613,28 +613,32 @@ export class TempestCommand extends EventEmitter<CommandEvents> {
     });
 
     operator.on('finding:discovered', ({ finding }) => {
-      this.vault.addFinding(finding);
-      this.emit('finding:discovered', { finding, operatorId: operator.id });
-      this.hooks.onFindingDiscovered?.(finding, { id: operator.id });
+      // The VAULT is the single canonical finding store. Broadcast/notify with the STORED record
+      // (same finding.id across merges, merged evidence, AUDITED severity + preserved
+      // assertedSeverity) — never the raw per-operator emission, or SSE/alerts/UI would render
+      // pre-dedup, pre-audit rows that contradict the final report.
+      const stored = this.vault.addFinding(finding);
+      this.emit('finding:discovered', { finding: stored, operatorId: operator.id });
+      this.hooks.onFindingDiscovered?.(stored, { id: operator.id });
 
       // Sync finding intelligence back to the target object
-      this.syncFindingToTarget(finding);
+      this.syncFindingToTarget(stored);
 
       // Post the finding to the shared board as a lead — the swarm's verifiable blackboard.
       // `provenance` carries the tool-vs-model-asserted signal (the refinement loop's feedback);
       // dedup + provenance-endorsement are the board's job. Best-effort: never break the mission.
       // Gated on coordination so the baseline (coordination off) leaves the board fully inert.
       if (this.coordinationEnabled) try {
-        const prov = finding.verifyGate?.provenance ?? 'none';
+        const prov = stored.verifyGate?.provenance ?? 'none';
         this.packBoard.postLead(operator.id, {
           kind: 'lead',
-          title: finding.title,
-          where: { targetId: finding.id },
-          vulnClass: finding.cwe?.[0] ?? 'unclassified',
+          title: stored.title,
+          where: { targetId: stored.id },
+          vulnClass: stored.cwe?.[0] ?? 'unclassified',
           confidence: prov === 'tool' ? 'high' : prov === 'context' ? 'medium' : 'low',
           provenance: prov,
-          cwe: finding.cwe?.[0],
-          severity: finding.severity,
+          cwe: stored.cwe?.[0],
+          severity: stored.severity,
         });
         this.leadsPosted++;
       } catch { /* best-effort */ }
@@ -645,25 +649,25 @@ export class TempestCommand extends EventEmitter<CommandEvents> {
       // Dedup + a per-run cap keep the loop bounded. Gated by T3MP3ST_SWARM_COORD for the bake-off.
       if (
         this.coordinationEnabled &&
-        finding.verifyGate?.provenance === 'tool' &&
-        !this.spawnedFollowups.has(finding.id) &&
+        stored.verifyGate?.provenance === 'tool' &&
+        !this.spawnedFollowups.has(stored.id) &&
         this.spawnedFollowups.size < this.maxFollowups
       ) {
         const mission = this.mission.getActiveMission();
         const queue = this.mission.getTaskQueue();
-        const idx = KILL_CHAIN_ORDER.indexOf(finding.phase);
+        const idx = KILL_CHAIN_ORDER.indexOf(stored.phase);
         const nextPhase = idx >= 0 && idx < KILL_CHAIN_ORDER.length - 1 ? KILL_CHAIN_ORDER[idx + 1] : undefined;
         const nextOp = nextPhase ? PHASE_ARCHETYPES[nextPhase]?.[0] : undefined;
         if (mission && queue && nextPhase && nextOp) {
-          this.spawnedFollowups.add(finding.id);
-          const cwe = finding.cwe?.length ? `, ${finding.cwe.join('/')}` : '';
+          this.spawnedFollowups.add(stored.id);
+          const cwe = stored.cwe?.length ? `, ${stored.cwe.join('/')}` : '';
           queue.add({
             id: randomUUID(),
             missionId: mission.id,
-            name: `Chase: ${finding.title}`.slice(0, 120),
+            name: `Chase: ${stored.title}`.slice(0, 120),
             description:
-              `A prior operator TOOL-VERIFIED this lead: "${finding.title}" (${finding.severity}${cwe}) on ${finding.targetId}. ` +
-              `${finding.description} Focus this ${nextPhase} step on THIS specific surface — confirm and advance it; do not re-scan broadly.`,
+              `A prior operator TOOL-VERIFIED this lead: "${stored.title}" (${stored.severity}${cwe}) on ${stored.targetId}. ` +
+              `${stored.description} Focus this ${nextPhase} step on THIS specific surface — confirm and advance it; do not re-scan broadly.`,
             phase: nextPhase,
             operatorType: nextOp,
             status: 'pending',
@@ -1179,7 +1183,9 @@ export class TempestCommand extends EventEmitter<CommandEvents> {
         this.clearDispatch(task.id);
         // STRUCTURED DISPOSITION wins over the bare success flag: a task that declared
         // "blocked" (planned work could not execute) or "failed" must not be recorded as
-        // completed coverage merely because the agent loop returned normally.
+        // completed coverage merely because the agent loop returned normally. "partial" DID
+        // execute (real coverage) — it completes the task but carries disposition:'partial'
+        // in the stored result, which mission completion consumes to degrade the objective.
         const disposition = result.disposition ?? (result.success === false ? 'failed' : 'completed');
         if (disposition === 'blocked') {
           const reason = result.dispositionReason || result.output || 'operator reported the planned work could not execute';
@@ -1190,7 +1196,7 @@ export class TempestCommand extends EventEmitter<CommandEvents> {
           taskQueue.recordAttempt(task.id, 'failed', result.dispositionReason || result.error || result.output);
         } else {
           taskQueue.complete(task.id, result);
-          taskQueue.recordAttempt(task.id, 'completed');
+          taskQueue.recordAttempt(task.id, 'completed', disposition === 'partial' ? `partial coverage: ${result.dispositionReason || 'required sub-objective unverified'}` : undefined);
           this.hooks.onTaskCompleted?.(task);
         }
       }).catch((_error) => {

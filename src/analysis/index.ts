@@ -293,10 +293,12 @@ export class AnalysisEngine {
       lines.push('');
       // Severity presentation follows the evidence-support model: the AUDITED severity (asserted
       // capped by what the attached evidence demonstrates) is the headline; the asserted claim is
-      // preserved alongside when the evidence does not bear it. An unverified claim NEVER renders
-      // as a mature high-severity row.
+      // preserved alongside when the evidence does not bear it. The vault clamps severity at
+      // storage, so the original claim lives in assertedSeverity. An unverified claim NEVER
+      // renders as a mature high-severity row.
       const audited = auditedSeverity(finding);
-      lines.push(`**Severity:** ${audited.toUpperCase()}${audited !== finding.severity ? ` (asserted ${finding.severity.toUpperCase()} — capped: ${finding.claimSupport?.rationale ?? 'evidence does not support the claimed severity'})` : ''}`);
+      const asserted = finding.assertedSeverity ?? finding.severity;
+      lines.push(`**Severity:** ${audited.toUpperCase()}${asserted !== audited ? ` (asserted ${asserted.toUpperCase()} — capped: ${finding.claimSupport?.rationale ?? 'evidence does not support the claimed severity'})` : ''}`);
       const gate = finding.verifyGate;
       const verified = finding.verifiedAt != null;
       // Truthful verification vocabulary: an evidence-SUPPORTED observation (e.g. reflected ACAO)

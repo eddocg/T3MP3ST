@@ -227,7 +227,18 @@ export interface Finding {
   id: string;
   title: string;
   description: string;
+  /**
+   * EFFECTIVE severity — audited at EvidenceVault storage/merge time against the deterministic
+   * evidence-support cap (claimSupport.severityCap). This is the value SSE events, alerts,
+   * reports, and severity counts consume. A source can never out-assert what its evidence bears.
+   */
   severity: Severity;
+  /**
+   * The severity the SOURCE (scanner template / builtin heuristic / model debrief) originally
+   * asserted, preserved verbatim for audit/debugging — never consumed for alerts or reporting.
+   * Captured at first storage; on merge the highest assertion seen is retained.
+   */
+  assertedSeverity?: Severity;
   targetId: string;
   operatorId: string;
   phase: KillChainPhase;
@@ -504,13 +515,16 @@ export interface Task {
  * Structured task disposition — reported by the operator's agent loop via the debrief contract,
  * NOT inferred from "the agent returned normally":
  *  - completed:        the planned work actually executed (findings or legitimate empty result)
+ *  - partial:          the work EXECUTED and produced real coverage, but the operator declares a
+ *                      required sub-objective could not be satisfied/verified — execution ≠ full
+ *                      coverage; degrades the mission objectiveOutcome, never reads as "blocked"
  *  - blocked:          the planned work COULD NOT execute (missing capability / fixture / tool
  *                      contract) — terminal, never counted as coverage
  *  - no_eligible_work: the task ran and legitimately found nothing eligible to do (truthful
  *                      negative; does not count as executed coverage for its phase)
  *  - failed:           attempted but errored
  */
-export type TaskDisposition = 'completed' | 'blocked' | 'no_eligible_work' | 'failed';
+export type TaskDisposition = 'completed' | 'partial' | 'blocked' | 'no_eligible_work' | 'failed';
 
 export interface TaskResult {
   success: boolean;

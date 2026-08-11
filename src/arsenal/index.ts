@@ -221,9 +221,23 @@ function parseTargetHeaderConfig(): TargetHeaderConfig | null {
  */
 export type AuthMode = 'inherit' | 'none';
 
-/** Coerce a tool parameter to an AuthMode — fail-safe: only the exact string 'none' suppresses. */
+/** The complete public contract — anything else is a validation error, never a silent default. */
+export const AUTH_MODES: readonly AuthMode[] = ['inherit', 'none'];
+
+/**
+ * Coerce a tool parameter to an AuthMode. STRICT contract: undefined/'' → 'inherit' (default);
+ * 'inherit'/'none' → as named; ANY other value (e.g. 'suppress', 'suppressed') throws a
+ * ToolError(validation_error) so a misspelled mode can never silently attach credentials the
+ * operator asked to suppress — or suppress credentials the operator expected to be applied.
+ * The error echoes only the (non-secret) mode token, never any credential material.
+ */
 export function resolveAuthMode(value: unknown): AuthMode {
-  return value === 'none' ? 'none' : 'inherit';
+  if (value === undefined || value === null || value === '') return 'inherit';
+  if (value === 'inherit' || value === 'none') return value;
+  throw new ToolError(
+    ToolErrorCategory.ValidationError,
+    `invalid authMode '${String(value).slice(0, 32)}' — supported values: ${AUTH_MODES.join(', ')}`,
+  );
 }
 
 function targetHeadersForUrl(url: string | URL, explicit?: RequestInit['headers'], authMode: AuthMode = 'inherit'): Headers | undefined {
@@ -2777,16 +2791,19 @@ ${issues.length ? `Issues:\n${issues.join('\n')}` : '✓ No obvious issues'}`,
 
           if (acao) {
             if (acao === '*') {
-              issue = 'Wildcard ACAO (*)';
+              issue = 'Wildcard ACAO (*) — any origin reflected';
               if (acac === 'true') {
                 vulnerable = true;
-                issue = 'Wildcard ACAO with credentials - CRITICAL';
+                // Neutral wording: ACAO:* + ACAC:true is a CONFIGURATION OBSERVATION. No
+                // "CRITICAL" label — authenticated sensitive browser impact is NOT demonstrated
+                // by headers alone (and browsers nullify credentialed wildcard reads).
+                issue = 'Wildcard ACAO (*) with ACAC:true — credentialed arbitrary-origin configuration observed; authenticated sensitive cross-origin read NOT demonstrated';
               }
             } else if (acao === test.origin && test.name !== 'Same origin (baseline)') {
               issue = `Origin reflected: ${acao}`;
               vulnerable = true;
               if (acac === 'true') {
-                issue += ' WITH credentials - CRITICAL';
+                issue += ' — ACAC:true (credentialed reflection observed; authenticated sensitive cross-origin impact NOT demonstrated)';
               }
             } else if (acao === 'null' && test.origin === 'null') {
               vulnerable = true;
@@ -2822,7 +2839,7 @@ ${issues.length ? `Issues:\n${issues.join('\n')}` : '✓ No obvious issues'}`,
           // credential/data-theft capability — even the "WITH credentials" case is a configuration
           // observation, so the ASSERTED severity stays bounded (low/medium, preserved separately)
           // and the evidence-vs-claim gate caps the AUDITED severity at low.
-          severity: vulnerabilities.some(v => v.includes('WITH credentials') || v.includes('Wildcard ACAO with credentials')) ? 'medium' as const : 'low' as const,
+          severity: vulnerabilities.some(v => v.includes('ACAC:true')) ? 'medium' as const : 'low' as const,
           details: vulnerabilities.join('; '),
           category: 'cors',
           observationClass: 'observation',

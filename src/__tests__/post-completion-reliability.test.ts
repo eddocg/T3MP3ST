@@ -322,8 +322,10 @@ describe('finding maturity — unverified CORS cannot be mature HIGH', () => {
     // the probe "with credentials" is NOT a demonstrated victim-browser sensitive read.
     expect(stored.claimSupport?.severityCap).toBe('low');
     expect(auditedSeverity(stored)).toBe('low');
-    // Asserted severity is preserved separately (never rewritten away)…
-    expect(stored.severity).toBe('high');
+    // New storage contract: severity is EFFECTIVE (audited at the vault boundary); the source's
+    // assertion is preserved separately in assertedSeverity.
+    expect(stored.severity).toBe('low');
+    expect(stored.assertedSeverity).toBe('high');
     // …and an asserted-CRITICAL observation of the same condition caps identically. (Evidence
     // origins differ — attacker.example vs evil.example — so these are two distinct boundaries
     // and MUST NOT merge; each is independently capped.)
@@ -336,7 +338,8 @@ describe('finding maturity — unverified CORS cannot be mature HIGH', () => {
     expect(critical.claimSupport?.supportLevel).toBe('supported');
     expect(critical.claimSupport?.severityCap).toBe('low');
     expect(auditedSeverity(critical)).toBe('low');
-    expect(critical.severity).toBe('critical'); // asserted preserved
+    expect(critical.severity).toBe('low'); // effective (clamped at storage)
+    expect(critical.assertedSeverity).toBe('critical'); // asserted preserved
     expect(vault.getAllFindings().length).toBe(2);
   });
 
@@ -359,7 +362,8 @@ describe('finding maturity — unverified CORS cannot be mature HIGH', () => {
     }));
     expect(swagger.claimSupport?.supportLevel).toBe('supported');
     expect(auditedSeverity(swagger)).toBe('info'); // exposure ≠ critical impact
-    expect(swagger.severity).toBe('critical'); // asserted severity preserved separately
+    expect(swagger.severity).toBe('info'); // effective (clamped at storage)
+    expect(swagger.assertedSeverity).toBe('critical'); // asserted severity preserved separately
   });
 });
 
@@ -749,5 +753,195 @@ describe('static wiring — server, general, UI, arsenal', () => {
     expect(indexSource).toContain('this.syncRuntimeScanPolicy(mission);');
     expect(indexSource).toContain('clearRuntimeScanPolicy();');
     expect(indexSource).toContain('allowFullRangeScans: this.allowFullRangeScans');
+  });
+});
+
+// ═════════════════ RUNTIME TRUTH II — CANONICAL STORE / AUDITED SSE / AUTHMODE ═════════════════
+
+describe('canonical finding identity — one store, audited severity everywhere', () => {
+  async function liveCommand() {
+    const mod = await import('../index.js');
+    const command = new mod.TempestCommand({ name: 'Truth Op', llm: { provider: 'mock', model: 'mock-model' } }) as any;
+    command.targetEnv.addTarget({
+      id: 'target-1', name: 'api', type: 'api', zone: 'external', status: 'identified',
+      address: TARGET, discoveredAt: Date.now(),
+    });
+    const mission = command.mission.createMission({
+      name: 'Truth Op', objectives: ['broad coverage'], objectiveClass: 'general', missionFamily: 'web_api',
+    });
+    command.mission.startMission(mission.id);
+    // addTarget may assign its own id — resolve the STORED target id for finding attribution.
+    const targetId = command.targetEnv.getAllTargets()[0].id;
+    return { command, mission, targetId };
+  }
+
+  const corsFinding = (targetId: string, over: Partial<Finding>): Finding => makeFinding({
+    title: 'CORS Misconfiguration',
+    description: 'ACAO reflection observed',
+    severity: 'high', // asserted by the source — must NOT survive as the effective severity
+    targetId,
+    category: 'cors',
+    evidence: [{
+      type: 'response',
+      content: 'GET https://api.example.test/ 200\naccess-control-allow-origin: https://attacker.example\naccess-control-allow-credentials: true',
+      timestamp: Date.now(),
+      metadata: { tool: 'cors_check' },
+    }],
+    ...over,
+  });
+
+  it('P3: asserted-HIGH CORS + config-only evidence → stored low + assertedSeverity high; event + SSE broadcast carry AUDITED low; report shows low', async () => {
+    const { command, targetId } = await liveCommand();
+    const broadcastEvents: Array<{ event: string; data: any }> = [];
+    command.connectBroadcast((event: string, data: any) => broadcastEvents.push({ event, data }));
+    const emitted: any[] = [];
+    command.on('finding:discovered', (d: any) => emitted.push(d));
+
+    // Real operator ingestion path: gate + emit → vault (canonical) → broadcast of the STORED row.
+    const op = command.spawnOperator('Ghost-1', 'recon');
+    op.recordFinding(corsFinding(targetId, {}));
+
+    // Canonical store: ONE finding; effective severity audited to low; assertion preserved.
+    const all = command.vault.getAllFindings();
+    expect(all.length).toBe(1);
+    expect(all[0].severity).toBe('low'); // audited/effective
+    expect(all[0].assertedSeverity).toBe('high'); // source claim preserved for audit
+    expect(all[0].claimSupport?.severityCap).toBe('low');
+
+    // The finding:discovered event carries the STORED canonical record — audited severity,
+    // not the raw assertion (this is what drives UI alerts).
+    expect(emitted.length).toBe(1);
+    expect(emitted[0].finding.severity).toBe('low');
+    expect(emitted[0].finding.assertedSeverity).toBe('high');
+
+    // The SSE broadcast payload (what the War Room consumes) — audited severity + human target.
+    const findingBroadcast = broadcastEvents.find((e) => e.event === 'finding');
+    expect(findingBroadcast).toBeTruthy();
+    expect(findingBroadcast!.data.finding.severity).toBe('low');
+    expect(findingBroadcast!.data.finding.severity).not.toBe('high'); // no CRITICAL/HIGH alert can fire
+    expect(findingBroadcast!.data.finding.targetAddress).toBe(TARGET);
+
+    // The final report agrees: audited low in the summary, no HIGH row; assertion shown as capped.
+    command.mission.completeMission(command.mission.getActiveMission()!.id);
+    const report = command.generateReport();
+    expect(report).toContain('| High | 0 |');
+    expect(report).toContain('(asserted HIGH');
+    command.stop();
+  });
+
+  it('P2 e2e (final-report data path): same CORS root observation from two operators/times → ONE report row with both evidence items; weak-cipher dup → one row; /oauth2/authorize → distinct', async () => {
+    const { command, targetId } = await liveCommand();
+    const opA = command.spawnOperator('Ghost-1', 'recon');
+    const opB = command.spawnOperator('Ghost-2', 'recon');
+
+    // Same CORS condition on / from TWO operators at two times (reworded titles).
+    opA.recordFinding(corsFinding(targetId, { title: 'CORS Misconfiguration' }));
+    opB.recordFinding(corsFinding(targetId, {
+      title: 'Credentialed CORS origin reflection',
+      evidence: [{
+        type: 'response',
+        content: 'GET https://api.example.test/ 200 (second observation)\naccess-control-allow-origin: https://attacker.example',
+        timestamp: Date.now() + 1000,
+        metadata: { tool: 'curl_request' },
+      }],
+    }));
+
+    // Same weak-cipher template twice for the same host:443.
+    const cipher = (): Finding => makeFinding({
+      title: 'Weak Cipher Suites Detection',
+      targetId,
+      category: 'tls',
+      severity: 'medium',
+      evidence: [{
+        type: 'output',
+        content: 'nuclei: weak-cipher-suites at https://api.example.test:443',
+        timestamp: Date.now(),
+        metadata: { tool: 'nuclei' },
+      }],
+    });
+    opA.recordFinding(cipher());
+    opB.recordFinding(cipher());
+
+    // Genuinely different boundary: same CORS category on /oauth2/authorize.
+    opA.recordFinding(corsFinding(targetId, {
+      title: 'CORS Misconfiguration on OAuth authorization endpoint',
+      evidence: [{
+        type: 'response',
+        content: 'GET https://api.example.test/oauth2/authorize 200\naccess-control-allow-origin: https://attacker.example',
+        timestamp: Date.now(),
+        metadata: { tool: 'cors_check' },
+      }],
+    }));
+
+    // ONE canonical identity per boundary: 3 findings total, not 5.
+    const all = command.vault.getAllFindings();
+    expect(all.length).toBe(3);
+    const corsRoot = all.find((f: Finding) => f.title === 'CORS Misconfiguration')!;
+    expect(corsRoot.evidence.length).toBe(2); // both observations attached to the canonical row
+    expect(corsRoot.assertedSeverity).toBe('high'); // highest assertion kept for audit
+    expect(command.vault.consolidatedFindings).toBe(2);
+
+    // The FINAL REPORT renders exactly one row per canonical finding.
+    command.mission.completeMission(command.mission.getActiveMission()!.id);
+    const report = command.generateReport();
+    // Heading-exact matches: "### CORS Misconfiguration" must appear once (the merged root row),
+    // and the genuinely different boundary keeps its own distinct row.
+    expect(report.match(/^### CORS Misconfiguration$/gm)!.length).toBe(1);
+    expect(report.match(/^### Weak Cipher Suites Detection$/gm)!.length).toBe(1);
+    expect(report.match(/^### CORS Misconfiguration on OAuth authorization endpoint$/gm)!.length).toBe(1);
+    // Exactly 3 finding rows in the report body (one **Severity:** line per canonical finding).
+    expect(report.match(/\*\*Severity:\*\*/g)!.length).toBe(3);
+    command.stop();
+  });
+});
+
+describe('P4 — authMode public contract', () => {
+  it('only inherit|none are accepted; unknown values throw a validation error (never silently inherit)', async () => {
+    const { resolveAuthMode, AUTH_MODES } = await import('../arsenal/index.js');
+    expect(resolveAuthMode(undefined)).toBe('inherit');
+    expect(resolveAuthMode('')).toBe('inherit');
+    expect(resolveAuthMode('inherit')).toBe('inherit');
+    expect(resolveAuthMode('none')).toBe('none');
+    for (const bad of ['suppress', 'suppressed', 'NONE', 'off', 'false']) {
+      let threw: any = null;
+      try { resolveAuthMode(bad); } catch (e) { threw = e; }
+      expect(threw).toBeTruthy();
+      expect(threw.category).toBe('validation_error');
+      expect(String(threw.message)).toContain(bad);
+      expect(String(threw.message)).toContain(AUTH_MODES.join(', '));
+    }
+  });
+
+  it('an unknown authMode surfaces as an explicit validation error through Arsenal.execute (curl_request)', async () => {
+    const { Arsenal, EXTERNAL_TOOLS, createToolContext } = await import('../arsenal/index.js');
+    const arsenal = new Arsenal();
+    arsenal.register(EXTERNAL_TOOLS.find((t) => t.name === 'curl_request')!);
+    let threw: any = null;
+    try {
+      await arsenal.execute('curl_request', createToolContext(undefined, {
+        url: 'https://api.example.test/',
+        authMode: 'suppressed', // observed in the wild — must NOT silently become inherit/none
+      }));
+    } catch (e) { threw = e; }
+    expect(threw).toBeTruthy();
+    expect(threw.category).toBe('validation_error');
+    // No credential material in the error — only the offending (non-secret) mode token.
+    expect(String(threw.message)).toContain('suppressed');
+    expect(String(threw.message)).toContain('inherit');
+  });
+
+  it('cors_check output never labels a configuration-only observation CRITICAL', () => {
+    const arsenalSource = readFileSync(join(__dirname, '..', 'arsenal', 'index.ts'), 'utf8');
+    expect(arsenalSource).not.toContain('WITH credentials - CRITICAL');
+    expect(arsenalSource).not.toContain('Wildcard ACAO with credentials - CRITICAL');
+    expect(arsenalSource).toContain('NOT demonstrated');
+  });
+
+  it('UI: findings carry the canonical identity; the report renders the canonical store', () => {
+    const uiSource = readFileSync(join(__dirname, '..', '..', 'docs', 'index.html'), 'utf8');
+    expect(uiSource).toContain('findingId: finding.id'); // canonical identity upsert (SSE)
+    expect(uiSource).toContain('finding.assertedSeverity');
+    expect(uiSource).toContain("fetch(base + '/api/mission/findings')"); // report = canonical store
+    expect(uiSource).toContain('reportRows');
   });
 });

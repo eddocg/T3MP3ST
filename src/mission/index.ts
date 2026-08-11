@@ -865,7 +865,7 @@ export function createReconTasks(missionId: string, targetAddress: string, opts?
       id: randomUUID(),
       missionId,
       name: 'Authenticated Surface Baseline (current principal)',
-      description: `lane:baseline. A credential context is configured for the exact origin of ${targetAddress}. Establish the CURRENT principal's authenticated baseline, bounded and additive to broad coverage: (1) fetch a small set of representative routes (root, any discovered API index, one or two discovered resource routes) WITH the configured authenticated context (http_request/curl_request default authMode "inherit") and again deliberately WITHOUT it (pass authMode "none" — a non-secret control that suppresses the configured credential context); (2) record the differential (status code, redirect, content-length/body hash) per route as evidence tagged authContextApplied; (3) note which surface is only visible authenticated. This is single-principal baseline work — do NOT attempt cross-principal (A/B) comparisons, do NOT probe other principals' resources, and do NOT treat this as authorization-boundary verification. If the request tools genuinely cannot execute, end with outcome "blocked" in the debrief (never narrate inability and finish as completed).`,
+      description: `lane:baseline. A credential context is configured for the exact origin of ${targetAddress}. Establish the CURRENT principal's authenticated baseline, bounded and additive to broad coverage: (1) fetch a small set of representative routes (root, any discovered API index, one or two discovered resource routes) WITH the configured authenticated context (http_request/curl_request default authMode "inherit") and again deliberately WITHOUT it (pass authMode "none" — the ONLY supported values are exactly "inherit" and "none"; any other value is a validation error); (2) record the differential (status code, redirect, content-length/body hash) per route as evidence tagged authContextApplied; (3) note which surface is only visible authenticated. This is single-principal baseline work — do NOT attempt cross-principal (A/B) comparisons, do NOT probe other principals' resources, and do NOT treat this as authorization-boundary verification. If the request tools genuinely cannot execute, end with outcome "blocked" in the debrief (never narrate inability and finish as completed).`,
       phase: KillChainPhase.RECON,
       operatorType: 'scanner',
       status: 'pending',
@@ -1120,6 +1120,23 @@ export function deriveObjectiveCompletion(mission: Mission, tasks: Task[]): Obje
           `executed phase(s): [${executedPhases.join(', ') || 'none'}]` +
           `; ${blockedRuntime.length} planned task(s) could not execute (blocked: ${blockedRuntime.map((t) => t.name).join('; ')}). ` +
           'Blocked work is NOT claimed as coverage.',
+        blockedPrerequisites,
+        completedPrerequisites,
+      };
+    }
+    // EXECUTION ≠ COVERAGE: a task that declared disposition "partial" RAN real planned work
+    // (it is not blocked) but could not satisfy/verify a required sub-objective. Partial task
+    // coverage degrades the mission outcome to partial — never silently "met" — and names what
+    // remained unverified.
+    const partialTasks = tasks.filter((t) => t.status === 'completed' && t.result?.disposition === 'partial');
+    if (partialTasks.length > 0) {
+      return {
+        outcome: 'partial',
+        reason: 'general mission — execution completed; ' +
+          `executed phase(s): [${executedPhases.join(', ') || 'none'}]` +
+          `; ${partialTasks.length} task(s) executed with PARTIAL coverage: ` +
+          partialTasks.map((t) => `${t.name} (${t.result?.dispositionReason || 'sub-objective unverified'})`).join('; ') +
+          '. Partial coverage is not full objective coverage.',
         blockedPrerequisites,
         completedPrerequisites,
       };

@@ -110,7 +110,7 @@ export interface AgentResult {
    * by this field (it stays absent and the legacy path applies); the contract teaches the model
    * to declare blocked/no_eligible_work explicitly.
    */
-  disposition?: 'completed' | 'blocked' | 'no_eligible_work' | 'failed';
+  disposition?: 'completed' | 'partial' | 'blocked' | 'no_eligible_work' | 'failed';
   dispositionReason?: string;
 }
 
@@ -586,11 +586,12 @@ export class AgentLoop extends EventEmitter<AgentEvents> {
       parts.push(`2. Analyze each result before deciding the next action`);
       parts.push(`3. Report findings immediately as you discover them`);
       parts.push(`4. When finished, END your final message with a single fenced \`\`\`json block:\n` +
-        `   {"findings":[{"title":"…","severity":"critical|high|medium|low|info","details":"… cite the tool output that evidences it …","cvss":0.0,"cve":["…"],"remediation":"…"}],"abstained":false,"outcome":"completed|blocked|no_eligible_work|failed","outcomeReason":"…"}\n` +
+        `   {"findings":[{"title":"…","severity":"critical|high|medium|low|info","details":"… cite the tool output that evidences it …","cvss":0.0,"cve":["…"],"remediation":"…"}],"abstained":false,"outcome":"completed|partial|blocked|no_eligible_work|failed","outcomeReason":"…"}\n` +
         `   This block is the ONLY finding channel the harness records — anything described only in prose is dropped. Emit [] findings + "abstained":true if you found nothing real.\n` +
         `   outcome semantics (declare honestly — returning normally is NOT treated as success):\n` +
-        `   - "completed": the planned work actually executed (whether or not it produced findings — a real negative result is still completed)\n` +
-        `   - "blocked": the planned work COULD NOT execute (missing tool capability, missing fixture, tool contract gap) — say why in outcomeReason\n` +
+        `   - "completed": the planned work actually executed AND satisfied the task objective (a real negative result is still completed)\n` +
+        `   - "partial": you EXECUTED meaningful planned work (tool results obtained) but a required sub-objective could not be satisfied or verified — name what remains unverified in outcomeReason. Use this when work ran; never say "blocked" for work that executed\n` +
+        `   - "blocked": the planned work COULD NOT execute (missing tool capability, missing fixture, tool contract gap) — say why in outcomeReason. Only for work that never ran\n` +
         `   - "no_eligible_work": you assessed and there was legitimately nothing eligible to do for this task\n` +
         `   - "failed": you attempted the work and it errored`);
     }
@@ -657,11 +658,11 @@ export class AgentLoop extends EventEmitter<AgentEvents> {
    * debrief block yields nothing, so words like "critical"/"RCE"/"credential" in prose can
    * never manufacture a finding.
    */
-  private parseFinalDebrief(content: string): { findings: ToolFinding[]; outcome?: 'completed' | 'blocked' | 'no_eligible_work' | 'failed'; outcomeReason?: string } {
+  private parseFinalDebrief(content: string): { findings: ToolFinding[]; outcome?: 'completed' | 'partial' | 'blocked' | 'no_eligible_work' | 'failed'; outcomeReason?: string } {
     const EMPTY: { findings: ToolFinding[] } = { findings: [] };
     if (!content) return EMPTY;
     const SEV = new Set(['critical', 'high', 'medium', 'low', 'info']);
-    const OUTCOMES = new Set(['completed', 'blocked', 'no_eligible_work', 'failed']);
+    const OUTCOMES = new Set(['completed', 'partial', 'blocked', 'no_eligible_work', 'failed']);
     const blocks = [...content.matchAll(/```(?:json)?\s*([\s\S]*?)```/g)].map((m) => m[1]);
     if (!blocks.length) return EMPTY; // no fenced debrief block → NO findings from prose. Contract.
     for (const c of blocks.reverse()) {
@@ -683,7 +684,7 @@ export class AgentLoop extends EventEmitter<AgentEvents> {
         }));
         // Structured task disposition — declared, never inferred from prose tone.
         const rawOutcome = String(obj.outcome ?? '').toLowerCase();
-        const outcome = OUTCOMES.has(rawOutcome) ? rawOutcome as 'completed' | 'blocked' | 'no_eligible_work' | 'failed' : undefined;
+        const outcome = OUTCOMES.has(rawOutcome) ? rawOutcome as 'completed' | 'partial' | 'blocked' | 'no_eligible_work' | 'failed' : undefined;
         const outcomeReason = typeof obj.outcomeReason === 'string' && obj.outcomeReason.trim()
           ? obj.outcomeReason.trim().slice(0, 500)
           : undefined;
