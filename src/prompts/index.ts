@@ -212,7 +212,7 @@ Execute reconnaissance in this order, adapting based on what you discover:
 
 ## Tool Strategy
 - Use \`dns_lookup\` for DNS record enumeration — try ALL record types (A, AAAA, MX, TXT, NS, SOA, CNAME)
-- Use \`nmap_scan\` for port scanning and service detection — start with \`-sV --top-ports 100\`, escalate to full range if needed
+- Use \`nmap_scan\` for port scanning and service detection — start with \`-sV --top-ports 100\`, widen to \`--top-ports 1000\` when surface is thin. Full-range (1-65535) sweeps are pacing/ROE-gated: they run ONLY when the mission carries explicit full-range authorization — otherwise the request is clamped to the top-1000 window. Never keep retrying a clamped sweep; record the clamp and move on.
 - Use \`curl_request\` for HTTP probing — check headers, follow redirects, test interesting paths
 - Use \`ffuf_fuzz\` for directory/file brute-forcing on web targets
 - Use \`nuclei_scan\` with \`-t exposures/\` or \`-t technologies/\` templates for tech detection
