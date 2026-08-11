@@ -153,6 +153,41 @@ export function runtimeTargetHeaderMetadata(): { present: boolean; origin: strin
   return { present: [...config.headers.keys()].length > 0, origin: config.origin, headerNames: [...config.headers.keys()] };
 }
 
+// =============================================================================
+// RUNTIME SCAN PACING POLICY (mission-scoped)
+// =============================================================================
+
+/**
+ * Mission-scoped scan pacing policy. `fullRangeAuthorized` is set by the engine while a mission
+ * carrying explicit full-range authorization (launch flag or directive language) is active, and
+ * cleared when no such mission is active. Tool handlers read it to decide whether an unbounded
+ * (1-65535 / -p-) sweep may run or must be clamped to the bounded top-1000 window.
+ */
+export interface RuntimeScanPolicy {
+  fullRangeAuthorized: boolean;
+  /** Redaction-safe provenance — WHAT authorized the sweep (e.g. 'mission "X" pacing/ROE'). */
+  authorizedBy?: string;
+}
+
+let runtimeScanPolicyState: RuntimeScanPolicy = { fullRangeAuthorized: false };
+
+/** Set the mission-scoped scan pacing policy (called by the engine on mission state changes). */
+export function setRuntimeScanPolicy(policy: RuntimeScanPolicy): void {
+  runtimeScanPolicyState = policy.fullRangeAuthorized
+    ? { fullRangeAuthorized: true, authorizedBy: policy.authorizedBy }
+    : { fullRangeAuthorized: false };
+}
+
+/** Clear any full-range authorization — the default autonomous posture (bounded top-1000). */
+export function clearRuntimeScanPolicy(): void {
+  runtimeScanPolicyState = { fullRangeAuthorized: false };
+}
+
+/** Read the current scan pacing policy (tool handlers). */
+export function runtimeScanPolicy(): RuntimeScanPolicy {
+  return { ...runtimeScanPolicyState };
+}
+
 /**
  * Push the active binding's literal header VALUES into the central redactor registry so that EVERY
  * persistence/export/SSE/ledger boundary (all of which route through redactString/redactSecrets) strips
@@ -3418,17 +3453,31 @@ const DANGEROUS_EXTERNAL_FLAGS: Record<string, RegExp> = {
   curl: /^(-o|-O|--output|--remote-name|-K|--config|-T|--upload-file|-x|--proxy|--preproxy|-D|--dump-header|--trace|--trace-ascii|-w|--write-out|--cert|--key|--cacert|--capath|--cert-type|--key-type|--output-dir|--create-dirs|-c|--cookie-jar)$/i,
   nmap: /^(-o[NXGAS]|--script|--script-args|--script-args-file|--script-help|--script-updatedb|-iL|--excludefile|--datadir|--servicedb|--versiondb|--resume|--stylesheet|--webxml)$/i,
 };
-function sanitizeExternalFlags(tool: 'curl' | 'nmap', raw?: string): string[] {
+export function sanitizeExternalFlags(tool: 'curl' | 'nmap', raw?: string): string[] {
   const bad = DANGEROUS_EXTERNAL_FLAGS[tool];
   const toks = (raw || '').split(/\s+/).filter(Boolean);
   const out: string[] = [];
   for (let i = 0; i < toks.length; i++) {
-    const name = toks[i].split('=')[0];
-    if (bad.test(name)) {
-      if (!toks[i].includes('=') && toks[i + 1] && !toks[i + 1].startsWith('-')) i++; // also drop the flag's value token
+    const tok = toks[i];
+    const name = tok.split('=')[0];
+    // A token is dangerous when it IS a listed flag ("-D", "--dump-header", "-oN") OR when it is
+    // a one-letter short flag with an ATTACHED value ("-Dfile", "-D-", "-o/tmp/x") — the anchored
+    // regex alone misses the attached form, which would pass file-write flags straight through.
+    const exactBad = bad.test(name);
+    const shortAttachedBad = !exactBad && /^-[A-Za-z].+$/.test(tok) && !tok.startsWith('--') && bad.test(tok.slice(0, 2));
+    if (exactBad || shortAttachedBad) {
+      // Every dangerous flag takes a VALUE. Attached/= forms ("-D-", "--config=x") carry their
+      // own; a bare flag consumes the NEXT token as its value — INCLUDING the bare "-" stdout
+      // convention ("-D -"), which is a value here, never an option. The old startsWith('-')
+      // guard refused to consume it and left an orphan "-" in argv → `curl: option -: is unknown`.
+      const selfContained = shortAttachedBad || tok.includes('=');
+      if (!selfContained && i + 1 < toks.length) i++;
       continue;
     }
-    out.push(toks[i]);
+    // A bare "-" is only ever meaningful as a consumed flag value (handled above). Any orphan
+    // reaching here would be passed to the tool as a malformed option — drop it defensively.
+    if (tok === '-') continue;
+    out.push(tok);
   }
   return out;
 }
@@ -3457,9 +3506,35 @@ export const EXTERNAL_TOOLS: CustomTool[] = [
 
       const args = [...flags];
       if (ports) args.push('-p', ports);
-      args.push(target);
 
-      const result = await runSubprocess('nmap', args, { timeout: 120000 });
+      // POLICY FIDELITY with a real authorization seam: a full-range (1-65535 / -p-) sweep is a
+      // pacing/ROE decision. DEFAULT autonomous posture = bounded top-1000 (clamp + loud
+      // annotation). A mission carrying explicit full-range authorization (launch flag or
+      // directive language, surfaced via the runtime scan policy) runs the sweep unbounded —
+      // the capability is preserved through the normal planning/ROE path, not a hidden hatch.
+      const scanPolicy = runtimeScanPolicy();
+      const finalArgs: string[] = [];
+      let fullRangeRequested = false;
+      for (let i = 0; i < args.length; i++) {
+        const a = args[i];
+        if (a === '-p-') {
+          fullRangeRequested = true;
+          if (scanPolicy.fullRangeAuthorized) finalArgs.push(a);
+          continue;
+        }
+        if ((a === '-p' || a === '--ports') && args[i + 1] !== undefined && /^(-|1\s*-\s*65535)$/.test(args[i + 1])) {
+          fullRangeRequested = true;
+          if (scanPolicy.fullRangeAuthorized) finalArgs.push(a, args[i + 1]);
+          i++; continue;
+        }
+        finalArgs.push(a);
+      }
+      const fullRangeClamped = fullRangeRequested && !scanPolicy.fullRangeAuthorized;
+      const fullRangeRun = fullRangeRequested && scanPolicy.fullRangeAuthorized;
+      if (fullRangeClamped) finalArgs.unshift('--top-ports', '1000');
+      finalArgs.push(target);
+
+      const result = await runSubprocess('nmap', finalArgs, { timeout: 120000 });
       if (result.exitCode !== 0) {
         return { success: false, error: `nmap failed: ${result.stderr}` };
       }
@@ -3468,7 +3543,11 @@ export const EXTERNAL_TOOLS: CustomTool[] = [
       const openPorts = (result.stdout.match(/(\d+)\/tcp\s+open/g) || []).length;
       return {
         success: true,
-        output: result.stdout,
+        output: (fullRangeClamped
+          ? '[policy] Full-range (1-65535) scan requested — clamped to --top-ports 1000 (default autonomous bound). Full-range sweeps stay available through the normal planning/ROE seam: state the full-range intent explicitly in the mission objective/operator directives, or launch with allowFullRangeScans.\n\n'
+          : fullRangeRun
+            ? `[policy] Full-range (1-65535) sweep authorized by ${scanPolicy.authorizedBy ?? 'mission pacing/ROE policy'} — running unbounded.\n\n`
+            : '') + result.stdout,
         findings: openPorts > 0 ? [{
           title: 'Open Ports/Services Detected (nmap)',
           severity: 'info',

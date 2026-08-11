@@ -38,6 +38,7 @@ import { listOperatorPrompts, setOperatorOverride, resetOperatorOverride, type O
 import { ingestRepoToSourceContext, runWhiteboxAnalysis, resolveRepoSourceForAnalysis, RepoCloneError, RepoPathError } from './recon/whitebox.js';
 import { initGrammars } from './recon/ts-grammars.js';
 import { redactCredential } from './evidence/index.js';
+import { findingFingerprint } from './evidence/classification.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -338,7 +339,7 @@ function sanitizeLocalBaseUrl(raw: unknown): { ok: true; value: string | null } 
   return { ok: true, value: v };
 }
 
-function createTempestCommandInstance(missionName: string, apiKey: string | undefined, provider: string, model: string, baseUrl?: string, objective?: { objectiveClass?: import('./types/index.js').MissionObjectiveClass; objectiveDirective?: string; missionFamily?: import('./types/index.js').MissionFamily }): TempestCommand {
+function createTempestCommandInstance(missionName: string, apiKey: string | undefined, provider: string, model: string, baseUrl?: string, objective?: { objectiveClass?: import('./types/index.js').MissionObjectiveClass; objectiveDirective?: string; missionFamily?: import('./types/index.js').MissionFamily; allowFullRangeScans?: boolean }): TempestCommand {
   // Tear down previous instance
   if (tempestCommand) {
     tempestCommand.stop();
@@ -351,6 +352,7 @@ function createTempestCommandInstance(missionName: string, apiKey: string | unde
     objectiveClass: objective?.objectiveClass,
     objectiveDirective: objective?.objectiveDirective,
     missionFamily: objective?.missionFamily,
+    allowFullRangeScans: objective?.allowFullRangeScans,
     llm: {
       provider: provider as any,
       model,
@@ -817,6 +819,12 @@ interface FindingRecord {
   createdAt: string;
   updatedAt: string;
   retestIds: string[];
+  /**
+   * Dedup fingerprint (origin+route+method+property+selector+boundary) shared with the live
+   * EvidenceVault — reworded emissions of the SAME underlying observation upsert in place
+   * instead of minting near-duplicate rows. Optional for legacy persisted records.
+   */
+  fingerprint?: string;
 }
 
 interface RetestRecord {
@@ -1045,14 +1053,29 @@ function upsertMissionFindingToLedger(finding: {
   description?: string;
   severity?: unknown;
   targetId?: string;
-  evidence?: Array<{ type?: string; content?: string; timestamp?: number }>;
+  category?: string;
+  cwe?: string[];
+  evidence?: Array<{ type?: string; content?: string; timestamp?: number; metadata?: Record<string, unknown> }>;
   verifyGate?: { provenance?: string };
 }, missionId?: string): void {
   const title = typeof finding.title === 'string' && finding.title.trim() ? finding.title.trim() : 'Untitled finding';
   const target = normalizeTargetValue(finding.targetId);
+  // Fingerprint dedup (shared model with the EvidenceVault): same origin+route+method+property+
+  // selector+boundary consolidates ONE record even when the LLM rewords the title across
+  // emissions ("CORS Misconfiguration" vs "Credentialed CORS origin reflection"). Legacy records
+  // without a fingerprint fall back to the title::target key.
+  const fingerprint = findingFingerprint({
+    targetId: finding.targetId,
+    title: finding.title,
+    category: finding.category,
+    cwe: finding.cwe,
+    evidence: finding.evidence as any,
+  });
   const dedupeKey = `${title.toLowerCase()}::${target.toLowerCase()}`;
   const existing = [...findingsLedger.values()].find(
-    record => `${record.title.toLowerCase()}::${record.target.toLowerCase()}` === dedupeKey,
+    record => record.fingerprint
+      ? record.fingerprint === fingerprint
+      : `${record.title.toLowerCase()}::${record.target.toLowerCase()}` === dedupeKey,
   );
   const now = nowIso();
   const severity = normalizeSeverity(finding.severity);
@@ -1093,6 +1116,7 @@ function upsertMissionFindingToLedger(finding: {
   if (existing) {
     existing.severity = severity;
     existing.claim = claim;
+    existing.fingerprint = existing.fingerprint ?? fingerprint;
     if (missionId) existing.missionId = missionId;
     mirrorEvidence(existing);
     existing.updatedAt = now;
@@ -1119,6 +1143,7 @@ function upsertMissionFindingToLedger(finding: {
     createdAt: now,
     updatedAt: now,
     retestIds: [],
+    fingerprint,
   };
   mirrorEvidence(record);
   findingsLedger.set(record.id, record);
@@ -7300,13 +7325,21 @@ app.get('/api/mission/findings', (_req: Request, res: Response) => {
     return;
   }
 
-  res.json({
-    findings: cmd.vault.getAllFindings(),
+  // Resolve the internal target UUID to the human target origin/address so reports and the UI
+  // never render a bare internal id. Additive field — targetId is preserved.
+  const addressById = new Map(cmd.targetEnv.getAllTargets().map((t) => [t.id, t.address]));
+  const findings = cmd.vault.getAllFindings().map((f) => ({
+    ...f,
+    targetAddress: addressById.get(f.targetId) ?? f.targetId,
+  }));
+
+  res.json(redactSecrets({
+    findings,
     // Redact: never return raw harvested secrets over the API (only metadata + a
     // secretCaptured flag). Loopback-only mitigates, but a security tool must not dump
     // secrets in its own responses (external-audit P0).
     credentials: cmd.cell.getAllCredentials().map(redactCredential),
-  });
+  }) as Record<string, unknown>);
 });
 
 // =============================================================================
@@ -7779,13 +7812,18 @@ app.post('/api/general/execute', async (req: Request, res: Response): Promise<vo
 
     // Create TempestCommand instance from the plan. An explicit objectiveClass body field is
     // structural operator intent and wins over text detection (absent => heuristic on objectives).
+    // allowFullRangeScans is the explicit pacing/ROE authorization for full-range port sweeps
+    // (absent => bounded top-1000; directive language can also authorize — see mission detection).
     const cmd = createTempestCommandInstance(
       execConfig.missionName,
       generalConfig.apiKey,
       generalConfig.provider,
       generalConfig.model,
       generalConfig.baseUrl,
-      { objectiveClass: parseObjectiveClassOverride((req.body as Record<string, unknown>).objectiveClass) }
+      {
+        objectiveClass: parseObjectiveClassOverride((req.body as Record<string, unknown>).objectiveClass),
+        allowFullRangeScans: (req.body as Record<string, unknown>).allowFullRangeScans === true ? true : undefined,
+      }
     );
 
     // Add targets from the plan
@@ -7930,13 +7968,17 @@ app.post('/api/general/auto', async (req: Request, res: Response): Promise<void>
 
     // An explicit objectiveClass body field is structural operator intent and wins over the
     // text heuristic applied to `objective` (absent => dominant-intent detection).
+    // allowFullRangeScans is the explicit pacing/ROE authorization for full-range port sweeps.
     const cmd = createTempestCommandInstance(
       execConfig.missionName,
       generalConfig.apiKey,
       generalConfig.provider,
       generalConfig.model,
       generalConfig.baseUrl,
-      { objectiveClass: parseObjectiveClassOverride((req.body as Record<string, unknown>).objectiveClass) }
+      {
+        objectiveClass: parseObjectiveClassOverride((req.body as Record<string, unknown>).objectiveClass),
+        allowFullRangeScans: (req.body as Record<string, unknown>).allowFullRangeScans === true ? true : undefined,
+      }
     );
 
     for (const target of execConfig.targets) {

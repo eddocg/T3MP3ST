@@ -241,7 +241,7 @@ export interface Finding {
   verifiedAt?: number;
   exploitedAt?: number;
   /** Result of the live verification gate — present once verifyFinding() has run. */
-  verifyGate?: { passed: boolean; provenance: 'none' | 'context' | 'tool'; reasons: string[]; checkedAt: number };
+  verifyGate?: { passed: boolean; provenance: 'none' | 'context' | 'tool'; reasons: string[]; checkedAt: number; capabilityVerified?: boolean };
   /**
    * Vulnerability family / claim category asserted by the SOURCE (scanner template, builtin
    * heuristic, or model debrief) — e.g. 'rce', 'credential', 'cors', 'sqli'. This is preserved
@@ -356,7 +356,8 @@ export interface Mission {
    * The operator's research objective class — ORTHOGONAL to the routed MissionFamily. A mission
    * can be family `web_api` while its objective class is `authorization_lifecycle`. This steers
    * which tasks are seeded (objective work vs. bounded prerequisite recon) and how completion is
-   * reported. 'general' = no narrow objective (default; full kill-chain coverage).
+   * reported. 'general' = no narrow objective (default; broad coverage across all phases with
+   * eligible work — never auto-claimed as "full kill-chain coverage" at completion).
    */
   objectiveClass?: MissionObjectiveClass;
   /**
@@ -380,6 +381,14 @@ export interface Mission {
    * are recorded `blocked_prerequisite`.
    */
   phaseDispositions?: PhaseDisposition[];
+  /**
+   * PACING/ROE AUTHORIZATION: the operator (via launch flag or explicit directive language such
+   * as "full port scan of all 65535 ports") authorized full-range (1-65535 / -p-) port sweeps for
+   * this mission. When absent/false, autonomous operators are bounded to top-1000 windows and any
+   * full-range request is clamped with a loud annotation. This is the normal planning/ROE seam
+   * for the capability — not a hidden escape hatch.
+   */
+  allowFullRangeScans?: boolean;
 }
 
 /** Truthful record of how a kill-chain phase concluded for a mission. */
@@ -421,7 +430,8 @@ export type MissionObjectiveOutcome =
   | 'blocked'
   | 'partial'
   | 'met'
-  | 'exhausted';
+  | 'exhausted'
+  | 'unresolved';
 
 /**
  * Complete derived mission/execution state for status + UI. NOT collapsed to "active means live".
@@ -673,6 +683,12 @@ export interface TempestConfig {
   objectiveClass?: MissionObjectiveClass;
   /** Free-text operator directive emphasis that steers the objective lane (advisory). */
   objectiveDirective?: string;
+  /**
+   * PACING/ROE authorization for full-range (1-65535 / -p-) port sweeps on the auto-created
+   * mission. Explicit config wins; otherwise the mission detects explicit full-range language
+   * in the objective directive. Absent = bounded top-1000 autonomous scans.
+   */
+  allowFullRangeScans?: boolean;
   /**
    * The routed MissionFamily for this run (e.g. 'web_api') — informational; stored on the Mission so
    * durable ledger records (hypotheses/work orders) are filed in the correct lane. Does NOT steer

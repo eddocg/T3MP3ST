@@ -262,9 +262,16 @@ export function findingFingerprint(f: {
     .map((p) => p.trim())
     .filter((p) => p.length > 0);
 
-  // Fallback: if we only have origin+property (a bare scanner finding), add a normalized title slug
-  // so two different observations on the same origin don't collapse into one.
-  if (parts.length <= 2) {
+  // Fallback: if we only have origin+property (a bare scanner/LLM finding), decide whether a
+  // title slug is needed to keep DISTINCT issues apart:
+  //  - EXPLICIT category (tool-asserted, e.g. cors / headers / openapi / version exposure):
+  //    origin+category IS the consolidation key. Reworded titles for the same underlying
+  //    observation ("CORS Misconfiguration" vs "Credentialed CORS origin reflection") must merge
+  //    into ONE candidate with multiple evidence records — not separate vulnerability rows.
+  //  - DERIVED/coarse property ('general'): keep a normalized title slug so unrelated findings
+  //    on the same target still stay separate.
+  const hasExplicitCategory = !!(f.category && f.category.trim()) && property !== 'general';
+  if (parts.length <= 2 && !hasExplicitCategory) {
     const slug = String(f.title ?? '')
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, ' ')

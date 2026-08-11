@@ -1378,7 +1378,11 @@ Return only a valid JSON object wrapped in a json code block. Keep it compact, c
   async produceSitrep(command: TempestCommand): Promise<GeneralSitrep> {
     const status = command.getStatus();
     const findings = command.vault.getAllFindings();
-    const mission = command.mission.getActiveMission();
+    // Post-completion truth: when no LIVE mission exists, reason from the LATEST TERMINAL
+    // mission (final phase/progress/outcome) instead of emitting "phase unknown, progress 0"
+    // against a completed operation. Never resurrects the mission as active.
+    const mission = command.mission.getActiveMission() ?? command.mission.getLatestTerminalMission();
+    const missionTerminal = !command.mission.getActiveMission() && !!mission;
     const operators = command.cell.getAllOperators().map(op => op.getSummary());
 
     const situationData = {
@@ -1407,6 +1411,13 @@ Return only a valid JSON object wrapped in a json code block. Keep it compact, c
         phase: mission?.currentPhase || 'unknown',
         progress: mission?.progress || 0,
         running: status.running,
+        // Terminal truth for the LLM: a completed mission is reported AS completed (with its
+        // objective outcome), never as "unknown phase / 0% / inactive".
+        status: mission?.status ?? 'idle',
+        terminal: missionTerminal,
+        objectiveClass: mission?.objectiveClass ?? 'general',
+        objectiveOutcome: mission?.objectiveOutcome ?? null,
+        completionReason: mission?.completionReason ?? null,
       },
       operators: operators.map(op => ({
         callsign: op.callsign,
@@ -1429,7 +1440,7 @@ Return only a valid JSON object wrapped in a json code block. Keep it compact, c
 
     try {
       const response = await this.llm.prompt(
-        `## SITUATION REPORT REQUEST\n\nCurrent operation state:\n\`\`\`json\n${JSON.stringify(situationData, null, 2)}\n\`\`\`\n\nIMPORTANT — honest language: work-order receipt/readiness counts are ADVISORY evidence-maturity signals, not hard gates. The runtime advances phases and completes the mission based on task completion, NOT on receipt/readiness. Do NOT claim the board is "blocked from closure" or that phases "cannot advance" because of missing receipts — describe them as evidence-maturity guidance (e.g. "N of M work orders still need corroborating receipts before their findings are report-ready"). Distinguish scanner observations from verified, demonstrated impact.\n\nProduce a brief SITREP as JSON with this schema:\n\`\`\`\n{"assessment":"string","findingsSummary":"string","needsAdaptation":boolean,"adaptation":"string or null","confidence":number_0_to_100,"nextActions":["string"]}\n\`\`\`\n\nRespond with ONLY valid JSON in a code block.`,
+        `## SITUATION REPORT REQUEST\n\nCurrent operation state:\n\`\`\`json\n${JSON.stringify(situationData, null, 2)}\n\`\`\`\n\nIMPORTANT — honest language: work-order receipt/readiness counts are ADVISORY evidence-maturity signals, not hard gates. The runtime advances phases and completes the mission based on task completion, NOT on receipt/readiness. Do NOT claim the board is "blocked from closure" or that phases "cannot advance" because of missing receipts — describe them as evidence-maturity guidance (e.g. "N of M work orders still need corroborating receipts before their findings are report-ready"). Distinguish scanner observations from verified, demonstrated impact.${missionTerminal ? '\n\nTERMINAL MISSION: this mission has COMPLETED (see missionStatus.status/objectiveOutcome/completionReason). Report it as a completed operation with its final outcome — do NOT describe it as "behind schedule", "phase unknown", or "inactive" as if it were still running.' : ''}\n\nProduce a brief SITREP as JSON with this schema:\n\`\`\`\n{"assessment":"string","findingsSummary":"string","needsAdaptation":boolean,"adaptation":"string or null","confidence":number_0_to_100,"nextActions":["string"]}\n\`\`\`\n\nRespond with ONLY valid JSON in a code block.`,
         GENERAL_REPLAN_PROMPT,
         { maxTokens: 2048, temperature: 0.3 }
       );

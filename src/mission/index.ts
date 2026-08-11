@@ -75,6 +75,24 @@ export function parseObjectiveClassOverride(value: unknown): MissionObjectiveCla
 }
 
 // =============================================================================
+// SCAN PACING / ROE INTENT
+// =============================================================================
+
+// Explicit full-range port-sweep intent — the operator affirms an UNBOUNDED (1-65535 / -p-)
+// scan in the mission objective/directives. Deliberately requires port/range context so broad
+// vocabulary ("comprehensive assessment", "full-spectrum") never authorizes a sweep by accident.
+const FULL_RANGE_SCAN_INTENT = /\b(full[- ]?range\s+port|full\s+port\s+(?:scan|sweep|range)|all\s+(?:65535\s+)?ports|all\s+tcp\s+ports|every\s+port|entire\s+port\s+(?:range|space)|complete\s+port\s+(?:range|sweep|scan)|comprehensive\s+port\s+(?:scan|sweep)|1\s*-\s*65535|0\s*-\s*65535|65535\s+ports)\b|(?:^|[\s"'])-p-(?=[\s"']|$)/i;
+
+/**
+ * Detect an explicit operator request for full-range (1-65535 / -p-) port sweeps in a mission
+ * objective/directive. This is the NORMAL planning/ROE seam that authorizes the autonomous
+ * full-range capability — without it, operators stay bounded to top-1000 windows.
+ */
+export function detectFullRangeScanIntent(text: string): boolean {
+  return FULL_RANGE_SCAN_INTENT.test(String(text || ''));
+}
+
+// =============================================================================
 // EVENTS
 // =============================================================================
 
@@ -368,6 +386,12 @@ export class MissionControl extends EventEmitter<MissionEvents> {
     rules?: RulesOfEngagement;
     objectiveClass?: MissionObjectiveClass;
     missionFamily?: MissionFamily;
+    /**
+     * PACING/ROE authorization for full-range (1-65535 / -p-) port sweeps. Explicit param wins;
+     * otherwise detected from explicit full-range language in the objective/directive text.
+     * Absent = autonomous operators stay bounded to top-1000 windows.
+     */
+    allowFullRangeScans?: boolean;
   }): Mission {
     const mission: Mission = {
       id: randomUUID(),
@@ -383,6 +407,8 @@ export class MissionControl extends EventEmitter<MissionEvents> {
       // explicitly supplied, so a narrow authorization directive binds which tasks get seeded.
       objectiveClass: params.objectiveClass ?? detectObjectiveClass(params.objectives.join(' ')),
       missionFamily: params.missionFamily,
+      allowFullRangeScans: params.allowFullRangeScans
+        ?? (detectFullRangeScanIntent(`${params.objectives.join(' ')} ${params.description ?? ''}`) || undefined),
     };
 
     this.missions.set(mission.id, mission);
@@ -423,7 +449,7 @@ export class MissionControl extends EventEmitter<MissionEvents> {
    * recon battery. Generic recon is reduced to a labeled prerequisite subset so prerequisites
    * never silently become the entire mission.
    */
-  generateTasksForTarget(targetAddress: string): void {
+  generateTasksForTarget(targetAddress: string, opts?: { authContextAvailable?: boolean }): void {
     const mission = this.getActiveMission();
     if (!mission) return;
 
@@ -440,7 +466,7 @@ export class MissionControl extends EventEmitter<MissionEvents> {
     }
 
     // Default: general coverage — start with recon tasks.
-    const reconTasks = createReconTasks(mission.id, targetAddress);
+    const reconTasks = createReconTasks(mission.id, targetAddress, opts);
     this.taskQueue.addMany(reconTasks);
   }
 
@@ -750,8 +776,18 @@ export class MissionControl extends EventEmitter<MissionEvents> {
 // TASK FACTORIES
 // =============================================================================
 
-export function createReconTasks(missionId: string, targetAddress: string): Task[] {
+export function createReconTasks(missionId: string, targetAddress: string, opts?: { authContextAvailable?: boolean }): Task[] {
   const tasks: Task[] = [];
+
+  // TRANSPORT FIDELITY: when the operator supplied an exact origin, its scheme is intent —
+  // an https:// origin must not be probed over cleartext http:// "to see if it also answers"
+  // unless evidence explicitly suggests a downgrade issue.
+  const httpsOrigin = /^https:\/\//i.test(targetAddress);
+  const schemeDirective = httpsOrigin
+    ? ` The supplied origin is HTTPS — use the exact https:// scheme for all web probing; do NOT downgrade to plain http://.`
+    : /^http:\/\//i.test(targetAddress)
+      ? ` The supplied origin is plain HTTP — do not silently upgrade or assume TLS.`
+      : '';
 
   tasks.push({
     id: randomUUID(),
@@ -770,7 +806,7 @@ export function createReconTasks(missionId: string, targetAddress: string): Task
     id: randomUUID(),
     missionId,
     name: 'Port Scanning & Service Detection',
-    description: `Scan ${targetAddress} for open ports and detect running services with version information. Start with top 1000 ports, then expand if significant results are found. Identify the full attack surface.`,
+    description: `Scan ${targetAddress} for open ports and detect running services with version information. Start with the top 1000 ports. Do NOT escalate to a full 1-65535 sweep on your own — a full-range scan requires explicit operator authorization (pacing/ROE constraint). Expand beyond top-1000 only within those bounds, and only against the in-scope host.`,
     phase: KillChainPhase.RECON,
     operatorType: 'recon',
     status: 'pending',
@@ -783,7 +819,7 @@ export function createReconTasks(missionId: string, targetAddress: string): Task
     id: randomUUID(),
     missionId,
     name: 'Web Probing & Technology Fingerprinting',
-    description: `Probe all HTTP/HTTPS services on ${targetAddress}. Check response headers, server banners, technology stack, CMS detection, security headers, robots.txt, sitemap.xml, and common paths. Identify frameworks, libraries, and potential misconfigurations.`,
+    description: `Probe the HTTP/HTTPS services on ${targetAddress}.${schemeDirective} Check response headers, server banners, technology stack, CMS detection, security headers, robots.txt, sitemap.xml, and common paths. Identify frameworks, libraries, and potential misconfigurations. Probe only the in-scope origin/host — discovered sibling or parent hosts are reconnaissance leads, not probe targets, unless ScopeGuard explicitly allows them.`,
     phase: KillChainPhase.RECON,
     operatorType: 'recon',
     status: 'pending',
@@ -796,7 +832,7 @@ export function createReconTasks(missionId: string, targetAddress: string): Task
     id: randomUUID(),
     missionId,
     name: 'Content Discovery',
-    description: `Discover hidden directories, files, API endpoints, admin panels, and backup files on ${targetAddress} using directory brute-forcing and common path checks.`,
+    description: `Discover hidden directories, files, API endpoints, admin panels, and backup files on ${targetAddress} using directory brute-forcing and common path checks.${schemeDirective}`,
     phase: KillChainPhase.RECON,
     operatorType: 'recon',
     status: 'pending',
@@ -804,6 +840,25 @@ export function createReconTasks(missionId: string, targetAddress: string): Task
     dependencies: [],
     createdAt: Date.now(),
   });
+
+  // AUTHENTICATED SURFACE BASELINE (additive): when the operator configured a credential context
+  // for this exact origin, a GENERAL mission also establishes the current principal's surface
+  // baseline — WITHOUT narrowing the mission to authorization_lifecycle and without claiming any
+  // cross-principal coverage. Single-principal, bounded, evidence-tagged.
+  if (opts?.authContextAvailable) {
+    tasks.push({
+      id: randomUUID(),
+      missionId,
+      name: 'Authenticated Surface Baseline (current principal)',
+      description: `lane:baseline. A credential context is configured for the exact origin of ${targetAddress}. Establish the CURRENT principal's authenticated baseline, bounded and additive to broad coverage: (1) fetch a small set of representative routes (root, any discovered API index, one or two discovered resource routes) WITH the configured authenticated context and again WITHOUT it; (2) record the differential (status code, redirect, content-length/body hash) per route as evidence tagged authContextApplied; (3) note which surface is only visible authenticated. This is single-principal baseline work — do NOT attempt cross-principal (A/B) comparisons, do NOT probe other principals' resources, and do NOT treat this as authorization-boundary verification.`,
+      phase: KillChainPhase.RECON,
+      operatorType: 'scanner',
+      status: 'pending',
+      priority: 8,
+      dependencies: [],
+      createdAt: Date.now(),
+    });
+  }
 
   return tasks;
 }
@@ -1002,9 +1057,64 @@ export function deriveObjectiveCompletion(mission: Mission, tasks: Task[]): Obje
   const completedPrerequisites = completedLane.map((t) => ({ id: t.id, name: t.name }));
 
   if (mission.objectiveClass !== 'authorization_lifecycle') {
+    // GENERAL missions: EXECUTION COMPLETE ≠ COVERAGE MET — but EMPTY PHASES ≠ INCOMPLETE
+    // RESEARCH either. The outcome reflects the declared/planned research objective: a broad
+    // assessment whose recon legitimately found nothing worth exploiting (exploitation /
+    // installation / c2 = no_eligible_work) COMPLETED its research objective — empty phases
+    // are a truthful negative result, separately observable in phaseDispositions, not a
+    // coverage shortfall. Only PLANNED work that failed or was skipped degrades the outcome.
+    const dispositions = mission.phaseDispositions ?? [];
+    const executedPhases = dispositions.filter((d) => d.disposition === 'executed').map((d) => d.phase);
+    const noWorkPhases = dispositions.filter((d) => d.disposition === 'no_eligible_work').map((d) => d.phase);
+    const failedPhases = dispositions.filter((d) => d.disposition === 'failed').map((d) => d.phase);
+    const failedRequired = tasks.filter((t) => t.status === 'failed' && t.required !== false);
+    const failedOptional = tasks.filter((t) => t.status === 'failed' && t.required === false);
+    const skippedCount = tasks.filter((t) => t.status === 'skipped').length;
+
+    // Nothing eligible to run anywhere (or no tasks at all) — the mission exhausted itself.
+    if (tasks.length === 0 || (dispositions.length > 0 && executedPhases.length === 0 && failedPhases.length === 0)) {
+      return {
+        outcome: 'exhausted',
+        reason: 'general mission — no eligible work could execute in any phase; no coverage claimed',
+        blockedPrerequisites,
+        completedPrerequisites,
+      };
+    }
+    // Required planned work failed — execution ended without the planned coverage.
+    if (failedRequired.length > 0 || failedPhases.length > 0) {
+      return {
+        outcome: 'unresolved',
+        reason: `general mission — execution completed with ${failedRequired.length} failed required task(s)` +
+          (failedPhases.length ? ` and failed phase(s) [${failedPhases.join(', ')}]` : '') +
+          '; planned coverage not achieved',
+        blockedPrerequisites,
+        completedPrerequisites,
+      };
+    }
+    // Planned OPTIONAL work failed or was explicitly skipped — the objective was largely
+    // researched but not every planned task completed: honest partial.
+    if (failedOptional.length > 0 || skippedCount > 0) {
+      return {
+        outcome: 'partial',
+        reason: 'general mission — execution completed; ' +
+          `executed phase(s): [${executedPhases.join(', ') || 'none'}]` +
+          (failedOptional.length ? `; ${failedOptional.length} optional task(s) failed` : '') +
+          (skippedCount ? `; ${skippedCount} task(s) skipped` : '') +
+          '. Coverage claims are limited to executed phases and evidence-backed findings.',
+        blockedPrerequisites,
+        completedPrerequisites,
+      };
+    }
+    // All planned/eligible work completed. Phases with no eligible work are a legitimate
+    // empty result (recon found no viable path into them) — named here for transparency and
+    // separately observable in phaseDispositions; they do NOT downgrade the outcome.
     return {
       outcome: 'met',
-      reason: 'general mission — full kill-chain coverage (no narrow objective gate)',
+      reason: 'general mission — all planned/eligible work completed' +
+        (noWorkPhases.length
+          ? `; phase(s) [${noWorkPhases.join(', ')}] had no eligible work — a legitimate empty result (no viable path found), not missing coverage`
+          : '') +
+        '; coverage claims limited to evidence-backed findings',
       blockedPrerequisites,
       completedPrerequisites,
     };

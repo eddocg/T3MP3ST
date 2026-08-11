@@ -18,6 +18,7 @@ import type { MissionControl } from '../mission/index.js';
 import type { OpsecController } from '../opsec/index.js';
 import { randomUUID } from 'crypto';
 import { SEVERITY_SCORES } from '../evidence/index.js';
+import { auditedSeverity, capabilitySupported } from '../evidence/classification.js';
 import { redactString } from '../redact.js';
 
 // =============================================================================
@@ -74,23 +75,28 @@ export class AnalysisEngine {
     targetStats: ReturnType<TargetEnvironment['getStats']>,
     vaultStats: ReturnType<EvidenceVault['getStats']>
   ): ExecutiveSummary {
+    // Bucket by AUDITED severity (asserted severity capped by what the attached evidence
+    // demonstrates) — report severity must never outrun the evidence-support model.
+    const auditedCounts: Record<Severity, number> = { critical: 0, high: 0, medium: 0, low: 0, info: 0 };
+    for (const f of findings) auditedCounts[auditedSeverity(f)]++;
+
     // Determine overall risk rating
     let riskRating: Severity = 'info';
-    if (vaultStats.bySeverity.critical > 0) riskRating = 'critical';
-    else if (vaultStats.bySeverity.high > 0) riskRating = 'high';
-    else if (vaultStats.bySeverity.medium > 0) riskRating = 'medium';
-    else if (vaultStats.bySeverity.low > 0) riskRating = 'low';
+    if (auditedCounts.critical > 0) riskRating = 'critical';
+    else if (auditedCounts.high > 0) riskRating = 'high';
+    else if (auditedCounts.medium > 0) riskRating = 'medium';
+    else if (auditedCounts.low > 0) riskRating = 'low';
 
     const overview = this.generateOverviewText(findings, targetStats, riskRating);
 
     return {
       overview,
       riskRating,
-      criticalFindings: vaultStats.bySeverity.critical,
-      highFindings: vaultStats.bySeverity.high,
-      mediumFindings: vaultStats.bySeverity.medium,
-      lowFindings: vaultStats.bySeverity.low,
-      infoFindings: vaultStats.bySeverity.info,
+      criticalFindings: auditedCounts.critical,
+      highFindings: auditedCounts.high,
+      mediumFindings: auditedCounts.medium,
+      lowFindings: auditedCounts.low,
+      infoFindings: auditedCounts.info,
       successfulExploits: findings.filter(f => f.exploitedAt).length,
       credentialsHarvested: vaultStats.totalCredentials,
       systemsCompromised: targetStats.owned,
@@ -107,7 +113,7 @@ export class AnalysisEngine {
   ): string {
     const totalFindings = findings.length;
     const criticalHigh = findings.filter(
-      f => f.severity === 'critical' || f.severity === 'high'
+      f => ['critical', 'high'].includes(auditedSeverity(f))
     ).length;
 
     if (totalFindings === 0) {
@@ -279,13 +285,35 @@ export class AnalysisEngine {
     lines.push('');
 
     const sortedFindings = [...report.findings].sort(
-      (a, b) => SEVERITY_SCORES[b.severity] - SEVERITY_SCORES[a.severity]
+      (a, b) => SEVERITY_SCORES[auditedSeverity(b)] - SEVERITY_SCORES[auditedSeverity(a)]
     );
 
     for (const finding of sortedFindings) {
       lines.push(`### ${redactString(finding.title)}`);
       lines.push('');
-      lines.push(`**Severity:** ${finding.severity.toUpperCase()}`);
+      // Severity presentation follows the evidence-support model: the AUDITED severity (asserted
+      // capped by what the attached evidence demonstrates) is the headline; the asserted claim is
+      // preserved alongside when the evidence does not bear it. An unverified claim NEVER renders
+      // as a mature high-severity row.
+      const audited = auditedSeverity(finding);
+      lines.push(`**Severity:** ${audited.toUpperCase()}${audited !== finding.severity ? ` (asserted ${finding.severity.toUpperCase()} — capped: ${finding.claimSupport?.rationale ?? 'evidence does not support the claimed severity'})` : ''}`);
+      const gate = finding.verifyGate;
+      const verified = finding.verifiedAt != null;
+      // Truthful verification vocabulary: an evidence-SUPPORTED observation (e.g. reflected ACAO)
+      // is reported as exactly that — never as a demonstrated capability, and never as
+      // "no tool-backed evidence" when evidence is attached but the gate has not run.
+      const verificationLabel = verified
+        ? 'verified (capability demonstrated)'
+        : gate?.capabilityVerified
+          ? 'capability-verified'
+          : finding.claimSupport?.supportLevel === 'supported'
+            ? (capabilitySupported(finding) ? 'evidence-supported' : 'evidence-supported observation — not a demonstrated capability')
+            : gate?.passed
+              ? 'unverified — provenance only'
+              : finding.evidence.length > 0
+                ? 'unverified — evidence present, not yet gated'
+                : 'unverified — no tool-backed evidence';
+      lines.push(`**Verification:** ${verificationLabel}`);
       if (finding.cvss) lines.push(`**CVSS:** ${finding.cvss}`);
       if (finding.cve?.length) lines.push(`**CVE:** ${finding.cve.join(', ')}`);
       lines.push('');
@@ -302,8 +330,12 @@ export class AnalysisEngine {
       if (finding.evidence.length > 0) {
         lines.push('**Evidence:**');
         for (const evidence of finding.evidence) {
-          const content = redactString(evidence.content);
-          lines.push(`- ${evidence.type}: \`${content.substring(0, 100)}${content.length > 100 ? '...' : ''}\``);
+          // Serialize intentionally — tool, timestamp, redacted content summary. Never implicit
+          // object stringification.
+          const tool = evidence.metadata?.tool ? ` · tool: ${evidence.metadata.tool}` : '';
+          const when = evidence.timestamp ? ` · ${new Date(evidence.timestamp).toISOString()}` : '';
+          const content = redactString(String(evidence.content ?? ''));
+          lines.push(`- [${evidence.type}]${tool}${when}: \`${content.substring(0, 100)}${content.length > 100 ? '...' : ''}\``);
         }
         lines.push('');
       }

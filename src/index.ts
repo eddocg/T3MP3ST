@@ -239,6 +239,9 @@ import {
   scopeViolation,
   runSubprocess,
   isToolAvailable,
+  runtimeTargetHeaderMetadata,
+  setRuntimeScanPolicy,
+  clearRuntimeScanPolicy,
 } from './arsenal/index.js';
 import { buildAdapterTools } from './arsenal/adapter-tools.js';
 import { buildPostExTools } from './arsenal/post-ex.js';
@@ -337,6 +340,7 @@ export class TempestCommand extends EventEmitter<CommandEvents> {
   private readonly objectiveClass?: import('./types/index.js').MissionObjectiveClass;
   private readonly objectiveDirective?: string;
   private readonly missionFamily?: import('./types/index.js').MissionFamily;
+  private readonly allowFullRangeScans?: boolean;
 
   /**
    * White-box source context (security-prioritized code excerpt), set by the
@@ -373,6 +377,7 @@ export class TempestCommand extends EventEmitter<CommandEvents> {
     this.hooks = config.hooks || {};
     this.objectiveClass = config.objectiveClass;
     this.objectiveDirective = config.objectiveDirective;
+    this.allowFullRangeScans = config.allowFullRangeScans;
     this.missionFamily = config.missionFamily;
     this.taskTimeoutMs = TempestCommand.resolveTaskTimeoutMs(config.llm.provider);
 
@@ -550,7 +555,7 @@ export class TempestCommand extends EventEmitter<CommandEvents> {
     this.targetEnv.on('target:added', (target) => {
       this.syncArsenalScope();
       if (this.mission.getActiveMission()) {
-        this.mission.generateTasksForTarget(target.address);
+        this.mission.generateTasksForTarget(target.address, { authContextAvailable: runtimeTargetHeaderMetadata().present });
         this.taskSeeded = true;
       }
     });
@@ -853,8 +858,24 @@ export class TempestCommand extends EventEmitter<CommandEvents> {
         : ['Enumerate attack surface', 'Identify vulnerabilities', 'Validate findings'],
       objectiveClass: this.objectiveClass,
       missionFamily: this.missionFamily,
+      allowFullRangeScans: this.allowFullRangeScans,
     });
     this.mission.startMission(mission.id);
+  }
+
+  /**
+   * Keep the arsenal's mission-scoped scan pacing policy in sync with the ACTIVE mission: a
+   * mission carrying explicit full-range authorization (launch flag or directive language)
+   * unblocks the autonomous full-range capability for exactly its lifetime; anything else
+   * (including no active mission) falls back to the bounded default. Called every tick and on
+   * stop so the policy can never leak across missions.
+   */
+  private syncRuntimeScanPolicy(mission: import('./types/index.js').Mission | null): void {
+    if (mission?.allowFullRangeScans) {
+      setRuntimeScanPolicy({ fullRangeAuthorized: true, authorizedBy: `mission "${mission.name}" pacing/ROE` });
+    } else {
+      clearRuntimeScanPolicy();
+    }
   }
 
   /**
@@ -871,6 +892,8 @@ export class TempestCommand extends EventEmitter<CommandEvents> {
     // Drop any pending timeout-reconciliation markers — a promise that never
     // settles must not leave its id lingering across missions.
     this.timedOutDispatches.clear();
+    // Mission-scoped scan pacing authorization never leaks past the run that granted it.
+    clearRuntimeScanPolicy();
     if (this.tickInterval) {
       clearInterval(this.tickInterval);
       this.tickInterval = null;
@@ -1005,6 +1028,10 @@ export class TempestCommand extends EventEmitter<CommandEvents> {
     const mission = this.mission.getActiveMission();
     if (!mission) return;
 
+    // Mission-scoped scan pacing: full-range authorization applies for exactly this mission's
+    // active lifetime (cleared on completion/stop — see stop() and the completion listener).
+    this.syncRuntimeScanPolicy(mission);
+
     // Get the task queue
     const taskQueue = this.mission.getTaskQueue();
     if (!taskQueue) return;
@@ -1013,8 +1040,12 @@ export class TempestCommand extends EventEmitter<CommandEvents> {
     if (!this.taskSeeded) {
       const targets = this.targetEnv.getAllTargets();
       if (targets.length > 0) {
+        // A configured credential context (exact-origin runtime headers) makes the general
+        // recon battery add ONE bounded current-principal authenticated baseline task —
+        // additive coverage, never a narrowing to authorization_lifecycle.
+        const authContextAvailable = runtimeTargetHeaderMetadata().present;
         for (const target of targets) {
-          this.mission.generateTasksForTarget(target.address);
+          this.mission.generateTasksForTarget(target.address, { authContextAvailable });
         }
         this.taskSeeded = true;
 
@@ -1722,19 +1753,56 @@ export class TempestCommand extends EventEmitter<CommandEvents> {
   }
 
   /**
-   * Generate engagement report
+   * Generate engagement report. When no active mission exists but a terminal one does, the
+   * terminal mission is the authoritative source — the report is generated from its persisted
+   * state (never resurrected as active). The markdown carries the mission metadata preamble
+   * (name, target origin, duration, objective class/outcome, phase dispositions, task summary)
+   * so a post-completion report is truthful rather than an empty "standby" document.
    */
   public generateReport(missionId?: string): string {
     const mission = missionId
       ? this.mission.getMission(missionId)
-      : this.mission.getActiveMission();
+      : this.mission.getActiveMission() ?? this.mission.getLatestTerminalMission();
 
     if (!mission) {
       throw new Error('No mission found for reporting');
     }
 
     const report = this.analysis.generateReport(mission.id, 'full_report');
-    return this.analysis.exportToMarkdown(report);
+    return this.buildMissionReportPreamble(mission) + this.analysis.exportToMarkdown(report);
+  }
+
+  /** Redaction-safe mission metadata header for exported reports (live or terminal missions). */
+  private buildMissionReportPreamble(mission: import('./types/index.js').Mission): string {
+    const tasks = this.mission.getTaskQueue().getForMission(mission.id);
+    const count = (s: string) => tasks.filter((t) => t.status === s).length;
+    const targets = this.targetEnv.getAllTargets().map((t) => t.address);
+    const durationMs = mission.completedAt && mission.startedAt ? mission.completedAt - mission.startedAt : 0;
+    const secs = Math.max(0, Math.floor(durationMs / 1000));
+    const duration = `${String(Math.floor(secs / 3600)).padStart(2, '0')}:${String(Math.floor((secs % 3600) / 60)).padStart(2, '0')}:${String(secs % 60).padStart(2, '0')}`;
+    const lines: string[] = [];
+    lines.push(`# ${mission.name} — Mission Report`);
+    lines.push('');
+    lines.push(`**Status:** ${mission.status}`);
+    lines.push(`**Target:** ${targets.join(', ') || 'unknown'}`);
+    if (mission.startedAt) lines.push(`**Started:** ${new Date(mission.startedAt).toISOString()}`);
+    if (mission.completedAt) lines.push(`**Completed:** ${new Date(mission.completedAt).toISOString()}`);
+    lines.push(`**Duration:** ${duration}`);
+    lines.push(`**Objective class:** ${mission.objectiveClass ?? 'general'}`);
+    if (mission.objectiveOutcome) lines.push(`**Objective outcome:** ${mission.objectiveOutcome}`);
+    if (mission.completionReason) lines.push(`**Completion reason:** ${mission.completionReason}`);
+    lines.push(`**Tasks:** ${tasks.length} total — ${count('completed')} completed, ${count('failed')} failed, ${count('skipped')} skipped, ${count('blocked')} blocked`);
+    if (mission.phaseDispositions?.length) {
+      lines.push('');
+      lines.push('**Phase dispositions:**');
+      for (const d of mission.phaseDispositions) {
+        lines.push(`- ${d.phase}: ${d.disposition} (${d.completed}/${d.total} completed${d.failed ? `, ${d.failed} failed` : ''}${d.blocked ? `, ${d.blocked} blocked` : ''}${d.skipped ? `, ${d.skipped} skipped` : ''})`);
+      }
+    }
+    lines.push('');
+    lines.push('---');
+    lines.push('');
+    return lines.join('\n');
   }
 }
 

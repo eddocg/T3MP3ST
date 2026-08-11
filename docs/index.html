@@ -7934,8 +7934,11 @@ Correlating findings across agents, identifying patterns, producing actionable i
                             id: missionFindings.length + 1,
                             timestamp: f.timestamp || new Date().toLocaleTimeString('en-US', { hour12: false }),
                             severity: f.severity || 'info', type: f.type || 'vuln', title: title,
-                            target: f.target || f.targetId || '-', phase: f.phase || '-',
-                            detail: f.detail || f.description || '', evidence: f.evidence || ''
+                            // Prefer the server-resolved human target origin over the internal UUID.
+                            target: f.targetAddress || f.target || f.targetId || '-', phase: f.phase || '-',
+                            detail: f.detail || f.description || '', evidence: f.evidence || '',
+                            // Trust-model fields for honest report rendering (audited severity + verification).
+                            claimSupport: f.claimSupport || null, verifyGate: f.verifyGate || null, verifiedAt: f.verifiedAt || null
                         });
                         added++;
                     });
@@ -15563,19 +15566,96 @@ Be brutally honest. This is not a pep talk.`;
         }
 
         // ═══════════ EXPORT MISSION REPORT ═══════════
-        function exportMissionReport() {
-            const missionName = document.getElementById('missionName')?.value || document.getElementById('cmdMissionName')?.textContent || 'T3MP3ST Mission';
-            const elapsed = document.getElementById('cmdElapsed')?.textContent || '00:00:00';
+        // Serialize one evidence entry intentionally: type, tool, ISO timestamp, redacted content
+        // summary. NEVER implicit JS object stringification ("[object Object]").
+        function serializeEvidenceEntry(e) {
+            if (e == null) return '';
+            if (typeof e === 'string') return e;
+            if (typeof e !== 'object') return String(e);
+            const type = e.type || 'evidence';
+            const tool = (e.metadata && e.metadata.tool) ? ` · tool: ${e.metadata.tool}` : '';
+            const when = e.timestamp ? ` · ${new Date(e.timestamp).toISOString()}` : '';
+            const raw = typeof e.content === 'string' ? e.content : (e.content != null ? JSON.stringify(e.content) : '');
+            const content = raw.length > 300 ? raw.slice(0, 300) + '…' : raw;
+            return `[${type}]${tool}${when}: ${content}`;
+        }
+        function serializeEvidenceForReport(ev) {
+            if (!ev) return '';
+            if (typeof ev === 'string') return ev;
+            const list = Array.isArray(ev) ? ev : [ev];
+            return list.map(serializeEvidenceEntry).filter(Boolean).join('\n');
+        }
+        // Audited severity: asserted severity capped by what the attached evidence demonstrates
+        // (mirrors the server-side evidence-support model — report severity never outruns evidence).
+        function auditedSeverityForReport(f) {
+            const order = ['info', 'low', 'medium', 'high', 'critical'];
+            const asserted = order.includes(f.severity) ? f.severity : 'info';
+            const cap = f.claimSupport && f.claimSupport.severityCap;
+            if (!cap || !order.includes(cap)) return { severity: asserted, capped: false };
+            return order.indexOf(asserted) > order.indexOf(cap)
+                ? { severity: cap, capped: true }
+                : { severity: asserted, capped: false };
+        }
+        async function exportMissionReport() {
             const now = new Date().toISOString().slice(0, 19).replace('T', ' ');
+            // Authoritative lifecycle source: when no live mission exists, the TERMINAL snapshot
+            // (server /api/mission/status → terminalMission) — never the stale DOM ("STANDBY",
+            // frozen 00:00:00). Does not resurrect a completed mission.
+            let term = null, statusTargets = [];
+            try {
+                const base = (typeof T3MP3ST_API !== 'undefined' && T3MP3ST_API.baseUrl) || '';
+                const st = await (await fetch(base + '/api/mission/status')).json();
+                term = st && st.terminalMission ? st.terminalMission : null;
+                if (Array.isArray(st.targets)) statusTargets = st.targets.map(t => (typeof t === 'string' ? t : (t.address || t.host || t.ip || ''))).filter(Boolean);
+            } catch (_) {}
+            const domName = document.getElementById('cmdMissionName')?.textContent || '';
+            const placeholder = /^(STANDBY|MISSION COMPLETE)/i.test(domName.trim());
+            const missionName = term?.name
+                || document.getElementById('missionName')?.value
+                || (!placeholder && domName ? domName : null)
+                || 'T3MP3ST Mission';
+            const fmtDuration = (ms) => {
+                const s = Math.max(0, Math.floor(ms / 1000));
+                return `${String(Math.floor(s / 3600)).padStart(2, '0')}:${String(Math.floor((s % 3600) / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
+            };
+            const elapsed = term?.startedAt
+                ? fmtDuration((term.completedAt || Date.now()) - term.startedAt)
+                : (document.getElementById('cmdElapsed')?.textContent || '00:00:00');
 
             let md = `# ${missionName} — Mission Report\n`;
-            md += `Generated: ${now}\nDuration: ${elapsed}\n\n`;
+            md += `Generated: ${now}\nDuration: ${elapsed}\n`;
+            if (term) {
+                md += `Status: ${term.status}\n`;
+                if (term.startedAt) md += `Started: ${new Date(term.startedAt).toISOString()}\n`;
+                if (term.completedAt) md += `Completed: ${new Date(term.completedAt).toISOString()}\n`;
+                md += `Objective class: ${term.objectiveClass || 'general'}\n`;
+                if (term.objectiveOutcome) md += `Objective outcome: ${term.objectiveOutcome}\n`;
+                if (term.completionReason) md += `Completion reason: ${term.completionReason}\n`;
+                if (term.taskSummary) md += `Tasks: ${term.taskSummary.total} total — ${term.taskSummary.completed} completed, ${term.taskSummary.failed} failed, ${term.taskSummary.skipped} skipped, ${term.taskSummary.blocked} blocked\n`;
+            }
+            md += `\n`;
 
-            // Summary stats
-            const critCount = missionFindings.filter(f => f.severity === 'critical').length;
-            const highCount = missionFindings.filter(f => f.severity === 'high').length;
-            const medCount = missionFindings.filter(f => f.severity === 'medium').length;
-            const lowCount = missionFindings.filter(f => f.severity === 'low').length;
+            // Objective / phase truth from the terminal snapshot.
+            if (term && Array.isArray(term.phaseDispositions) && term.phaseDispositions.length) {
+                md += `## Phase Dispositions\n\n`;
+                term.phaseDispositions.forEach(d => {
+                    md += `- ${d.phase}: ${d.disposition} (${d.completed}/${d.total} completed${d.failed ? `, ${d.failed} failed` : ''}${d.blocked ? `, ${d.blocked} blocked` : ''}${d.skipped ? `, ${d.skipped} skipped` : ''})\n`;
+                });
+                md += `\n`;
+            }
+            if (term && Array.isArray(term.blockedPrerequisites) && term.blockedPrerequisites.length) {
+                md += `## Blocked Prerequisites\n\n`;
+                term.blockedPrerequisites.forEach(p => { md += `- ${p.name} — ${p.reason}\n`; });
+                md += `\n`;
+            }
+
+            // Summary stats — AUDITED severity (evidence-capped), so unverified claims cannot
+            // inflate the report's severity table.
+            const sevOf = (f) => auditedSeverityForReport(f).severity;
+            const critCount = missionFindings.filter(f => sevOf(f) === 'critical').length;
+            const highCount = missionFindings.filter(f => sevOf(f) === 'high').length;
+            const medCount = missionFindings.filter(f => sevOf(f) === 'medium').length;
+            const lowCount = missionFindings.filter(f => sevOf(f) === 'low').length;
             const credCount = missionFindings.filter(f => f.type === 'cred').length;
 
             md += `## Executive Summary\n\n`;
@@ -15585,12 +15665,12 @@ Be brutally honest. This is not a pep talk.`;
             if (credCount > 0) md += `| Credentials | ${credCount} |\n`;
             md += `\n`;
 
-            // Targets
-            if (MissionContext.targets.length > 0) {
+            // Targets — human origins, never internal UUIDs.
+            const targetList = statusTargets.length ? statusTargets
+                : MissionContext.targets.map(t => (typeof t === 'string' ? t : (t.host || t.ip || t.address || ''))).filter(Boolean);
+            if (targetList.length > 0) {
                 md += `## Targets\n\n`;
-                MissionContext.targets.forEach(t => {
-                    md += `- ${typeof t === 'string' ? t : (t.host || t.ip || JSON.stringify(t))}\n`;
-                });
+                targetList.forEach(t => { md += `- ${t}\n`; });
                 md += `\n`;
             }
 
@@ -15599,15 +15679,19 @@ Be brutally honest. This is not a pep talk.`;
                 md += `## Findings\n\n`;
                 missionFindings.sort((a, b) => {
                     const order = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
-                    return (order[a.severity] ?? 5) - (order[b.severity] ?? 5);
+                    return (order[sevOf(a)] ?? 5) - (order[sevOf(b)] ?? 5);
                 }).forEach((f, i) => {
-                    md += `### ${i + 1}. [${f.severity.toUpperCase()}] ${f.title}\n\n`;
+                    const a = auditedSeverityForReport(f);
+                    md += `### ${i + 1}. [${a.severity.toUpperCase()}] ${f.title}\n\n`;
+                    if (a.capped) md += `- **Asserted severity:** ${String(f.severity).toUpperCase()} (capped — ${f.claimSupport?.rationale || 'evidence does not support the claim'})\n`;
+                    md += `- **Verification:** ${f.verifiedAt ? 'verified' : (f.verifyGate?.capabilityVerified ? 'capability-verified' : 'unverified')}\n`;
                     md += `- **Target:** ${f.target}\n`;
                     md += `- **Phase:** ${f.phase}\n`;
                     md += `- **Type:** ${f.type}\n`;
                     md += `- **Time:** ${f.timestamp}\n`;
                     if (f.detail) md += `- **Detail:** ${f.detail}\n`;
-                    if (f.evidence) md += `- **Evidence:**\n\`\`\`\n${f.evidence}\n\`\`\`\n`;
+                    const evText = serializeEvidenceForReport(f.evidence);
+                    if (evText) md += `- **Evidence:**\n\`\`\`\n${evText}\n\`\`\`\n`;
                     md += `\n`;
                 });
             }
@@ -19877,10 +19961,10 @@ IMPORTANT: This is an authorized security testing/red team platform. All operati
             }
             // ── Drive the SitRep pipeline from /api/mission/status (sysPhases/sysFindings status cells were consolidated out) ──
             {
-                let phase = null, running = false;
+                let phase = null, running = false, term = null;
                 // `m.active` is the authoritative run flag; m.mission.status can stay 'active' after a
                 // stop (stale), which would wrongly keep the SitRep ACTIVE — so trust m.active only.
-                try { const m = await (await fetch(base + '/api/mission/status')).json(); phase = m.mission && m.mission.currentPhase; running = !!m.active;
+                try { const m = await (await fetch(base + '/api/mission/status')).json(); phase = m.mission && m.mission.currentPhase; running = !!m.active; term = m.terminalMission || null;
                   // Resume the Elapsed timer if this tab loaded INTO an already-running mission (missionStartTime is null).
                   if (running && !missionStartTime) { missionStartTime = (m.mission && m.mission.startedAt) || Date.now(); if (!missionTimer) missionTimer = setInterval(updateMissionTimer, 1000); updateMissionTimer(); }
                   // Single mission-state authority: reconcile the command header, fidelity banner,
@@ -19891,14 +19975,23 @@ IMPORTANT: This is an authorized security testing/red team platform. All operati
                 // drive the SitRep pipeline from the poll (SSE phase/sitrep events refine it live).
                 // Set a phase-based fallback headline so a page loaded INTO a running mission still
                 // reflects the current stage — but never clobber a richer Admiral narration.
+                // POST-COMPLETION TRUTH: when no mission is active but a terminal snapshot exists,
+                // report the COMPLETED operation (final phase + objective outcome) instead of the
+                // stale "Awaiting orders" standby state.
                 try {
                     if (typeof updateSitRep === 'function') {
                         const _h = document.getElementById('sitrepHeadline');
-                        const _isDefault = !_h || /^(Awaiting orders|⚓ [A-Z]+ in progress)/.test(_h.textContent);
-                        const _hl = running
-                            ? (_isDefault ? ('⚓ ' + String(phase || 'operation').toUpperCase() + ' in progress') : null)
-                            : 'Awaiting orders — point at a target and engage.';
-                        updateSitRep(phase || null, _hl, running ? 'ACTIVE' : 'STANDBY');
+                        const _isDefault = !_h || /^(Awaiting orders|⚓ [A-Z]+ in progress|✅ Mission complete)/.test(_h.textContent);
+                        if (running) {
+                            const _hl = _isDefault ? ('⚓ ' + String(phase || 'operation').toUpperCase() + ' in progress') : null;
+                            updateSitRep(phase || null, _hl, 'ACTIVE');
+                        } else if (term) {
+                            const _outcome = term.objectiveOutcome ? (' — objective ' + String(term.objectiveOutcome).toUpperCase()) : '';
+                            const _hl = _isDefault ? ('✅ Mission complete' + _outcome) : null;
+                            updateSitRep(term.finalPhase || null, _hl, 'COMPLETE');
+                        } else {
+                            updateSitRep(phase || null, 'Awaiting orders — point at a target and engage.', 'STANDBY');
+                        }
                     }
                 } catch (_) {}
             }
@@ -19953,7 +20046,7 @@ IMPORTANT: This is an authorized security testing/red team platform. All operati
         function updateSitRep(phase, headline, status) {
             if (phase !== false) renderSitRepPipeline(phase);
             if (headline) { const h = document.getElementById('sitrepHeadline'); if (h) h.textContent = headline; }
-            if (status !== undefined) { const s = document.getElementById('sitrepStatus'); if (s) { s.textContent = status; s.style.color = status === 'ACTIVE' ? '#00ff88' : '#666'; } }
+            if (status !== undefined) { const s = document.getElementById('sitrepStatus'); if (s) { s.textContent = status; s.style.color = status === 'ACTIVE' ? '#00ff88' : status === 'COMPLETE' ? '#3aa0ff' : '#666'; } }
         }
         window.updateSitRep = updateSitRep;
         try { renderSitRepPipeline(null); } catch (_) {}
