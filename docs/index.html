@@ -4380,6 +4380,7 @@
 
                     <div id="liveScanSummary" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;margin-bottom:14px;"></div>
                     <div id="stallRecoveryPanel" style="display:none;margin-bottom:14px;"></div>
+                    <div id="terminalObjectivePanel" style="display:none;margin-bottom:14px;"></div>
 
                     <div class="live-scan-grid">
                         <section style="background:var(--bg-secondary);border:1px solid var(--border-color);border-radius:8px;overflow:hidden;">
@@ -7606,6 +7607,40 @@ Correlating findings across agents, identifying patterns, producing actionable i
             renderLiveScanPage();
         };
 
+        // Renders the retained terminal snapshot (status.terminalMission) — objective outcome,
+        // completion reason, blocked/completed prerequisites, and per-phase truth. Redaction-safe:
+        // the server only ever sends names/reasons, never credential material.
+        function renderTerminalObjective(status) {
+            const host = document.getElementById('terminalObjectivePanel');
+            if (!host) return;
+            const term = status.terminalMission;
+            if (!term) { host.style.display = 'none'; host.innerHTML = ''; return; }
+            const esc = liveScanEscape;
+            const outcome = String(term.objectiveOutcome || 'unresolved').toUpperCase();
+            const outcomeColor = { MET: '#00ff88', PARTIAL: '#ffaa00', BLOCKED: '#ff4444', UNTESTED: '#ff4444', UNRESOLVED: '#ffaa00', EXHAUSTED: '#ffaa00' }[outcome] || '#ffaa00';
+            const blocked = Array.isArray(term.blockedPrerequisites) ? term.blockedPrerequisites : [];
+            const completed = Array.isArray(term.completedPrerequisites) ? term.completedPrerequisites : [];
+            const phases = Array.isArray(term.phaseDispositions) ? term.phaseDispositions : [];
+            const ts = term.taskSummary || {};
+            const phaseLabel = { executed: 'EXECUTED', blocked_prerequisite: 'BLOCKED', no_eligible_work: 'NO ELIGIBLE WORK', failed: 'FAILED' };
+            const phaseColor = { executed: '#00ff88', blocked_prerequisite: '#ff4444', no_eligible_work: '#888', failed: '#ff4444' };
+            host.style.display = 'block';
+            host.innerHTML = `
+              <div style="border:1px solid var(--border-color);border-left:3px solid ${outcomeColor};border-radius:8px;padding:14px;background:var(--bg-secondary);">
+                <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:8px;flex-wrap:wrap;">
+                  <div style="font-weight:700;color:var(--text-primary);">MISSION ${esc(String(term.status || '').toUpperCase())} — ${esc(term.name || '')}</div>
+                  <div style="font-family:'JetBrains Mono',monospace;font-size:12px;color:${outcomeColor};font-weight:700;">OBJECTIVE: ${esc(outcome)}</div>
+                </div>
+                ${term.completionReason ? `<div style="font-size:12px;color:var(--text-secondary);margin-bottom:10px;">${esc(term.completionReason)}</div>` : ''}
+                <div style="font-size:11px;color:var(--text-muted);margin-bottom:10px;">
+                  tasks: ${ts.completed ?? 0} completed · ${ts.failed ?? 0} failed · ${ts.blocked ?? 0} blocked · ${ts.skipped ?? 0} skipped · ${ts.retried ?? 0} retried
+                </div>
+                ${completed.length ? `<div style="margin-bottom:8px;"><div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px;">Completed prerequisite work</div>${completed.map(p => `<div style="font-size:12px;color:#00ff88;">✓ ${esc(p.name)}</div>`).join('')}</div>` : ''}
+                ${blocked.length ? `<div style="margin-bottom:8px;"><div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px;">Not exercised — blocked prerequisites</div>${blocked.map(p => `<div style="font-size:12px;color:#ff4444;">✗ ${esc(p.name)}</div><div style="font-size:11px;color:var(--text-muted);margin:2px 0 6px 16px;">${esc(p.reason || '')}</div>`).join('')}</div>` : ''}
+                ${phases.length ? `<div><div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px;">Phase truth</div><div style="display:flex;gap:6px;flex-wrap:wrap;">${phases.map(d => `<span style="font-size:10px;font-family:'JetBrains Mono',monospace;padding:3px 8px;border-radius:4px;border:1px solid var(--border-color);color:${phaseColor[d.disposition] || '#888'};" title="${d.completed} completed / ${d.blocked} blocked / ${d.failed} failed of ${d.total}">${esc(d.phase)}: ${esc(phaseLabel[d.disposition] || d.disposition)}</span>`).join('')}</div></div>` : ''}
+              </div>`;
+        }
+
         function renderLiveScanPage() {
             const page = document.getElementById('page-live-scan');
             if (!page) return;
@@ -7628,8 +7663,14 @@ Correlating findings across agents, identifying patterns, producing actionable i
                     status.stallReason ? 'stalled' : status.paused ? 'paused' : active ? 'running' : 'idle'
                 );
                 const stateColor = { running: '#00ff88', paused: '#ffaa00', stalled: '#ff4444', completed: '#00aaff', aborted: '#888', idle: '#888' }[derivedState] || '#ffaa00';
+                const objectiveClass = mission.objectiveClass && mission.objectiveClass !== 'general' ? mission.objectiveClass : null;
+                const outcomeColor = { met: '#00ff88', partial: '#ffaa00', blocked: '#ff4444', untested: '#ff4444', exhausted: '#ffaa00' }[String(mission.objectiveOutcome || '')] || 'var(--text-secondary)';
                 const cells = [
                     ['State', derivedState.toUpperCase(), stateColor],
+                    ...(objectiveClass ? [
+                        ['Objective', objectiveClass.replace(/_/g, ' '), '#00aaff'],
+                        ['Outcome', String(mission.objectiveOutcome || (active ? 'in progress' : 'unresolved')).toUpperCase(), outcomeColor],
+                    ] : []),
                     ['Phase', currentPhase, '#00aaff'],
                     ['Progress', progress, '#00ff88'],
                     ['Operators', String(operatorSummary.total ?? operators.length ?? 0), '#ffaa00'],
@@ -7646,6 +7687,12 @@ Correlating findings across agents, identifying patterns, producing actionable i
 
             // Stalled-mission recovery panel: show blockers + Retry / Resume / Abort / Skip actions.
             renderStallRecovery(status);
+
+            // Terminal objective panel: a completed/aborted mission keeps its audit trail — what the
+            // objective was, whether it was actually tested, why it blocked, what prerequisite work
+            // completed, and how each phase truthfully concluded. EXECUTION state ("completed") is
+            // never equated with OBJECTIVE success.
+            renderTerminalObjective(status);
 
             const opCount = document.getElementById('liveScanOperatorCount');
             if (opCount) opCount.textContent = `${operatorSummary.busy ?? operators.filter(op => ['tasked', 'executing'].includes(op.status)).length ?? 0} busy`;
@@ -8562,13 +8609,25 @@ o.id === 'coordinator' ? `1. MISSION_STATUS: Progress assessment
 
             const isError = !!errorMsg;
 
-            // Update War Room command header
+            // Update War Room command header. "MISSION COMPLETE" is an EXECUTION state — fetch the
+            // terminal snapshot so the objective outcome (MET/PARTIAL/BLOCKED/UNRESOLVED) is shown
+            // alongside it instead of the misleading "All phases executed".
             const cmdName = document.getElementById('cmdMissionName');
             const cmdStatus = document.getElementById('cmdMissionStatus');
             if (cmdName) cmdName.textContent = isError ? 'MISSION FAILED' : 'MISSION COMPLETE';
             if (cmdStatus) {
-                cmdStatus.textContent = isError ? errorMsg : 'All phases executed';
+                cmdStatus.textContent = isError ? errorMsg : 'Execution finished';
                 cmdStatus.style.color = isError ? '#ff4444' : '#00ff88';
+            }
+            if (!isError) {
+                T3MP3ST_API.get('/api/mission/status').then((s) => {
+                    const term = s?.terminalMission;
+                    if (!term || !cmdStatus) return;
+                    const outcome = String(term.objectiveOutcome || 'unresolved').toUpperCase();
+                    const color = { MET: '#00ff88', PARTIAL: '#ffaa00', BLOCKED: '#ff4444', UNTESTED: '#ff4444', UNRESOLVED: '#ffaa00' }[outcome] || '#ffaa00';
+                    cmdStatus.textContent = `Execution finished — objective: ${outcome}`;
+                    cmdStatus.style.color = color;
+                }).catch(() => {});
             }
             // Restore ENGAGE button + clear LIVE/SIM banner + narration rail (see resetEngageUI).
             resetEngageUI();
@@ -19716,7 +19775,18 @@ IMPORTANT: This is an authorized security testing/red team platform. All operati
                 const priorName = cmdName ? (cmdName.textContent || '') : '';
                 const wasError = /FAILED/.test(priorName);
                 if (cmdName && !/FAILED|COMPLETE/.test(priorName)) cmdName.textContent = 'MISSION COMPLETE';
-                if (cmdStatus && !wasError) { cmdStatus.textContent = 'All phases executed'; cmdStatus.style.color = '#00ff88'; }
+                if (cmdStatus && !wasError) { cmdStatus.textContent = 'Execution finished'; cmdStatus.style.color = '#00ff88'; }
+                // Enrich with the retained objective outcome (EXECUTION finished ≠ OBJECTIVE met).
+                if (cmdStatus && !wasError && typeof T3MP3ST_API !== 'undefined') {
+                    T3MP3ST_API.get('/api/mission/status').then((s) => {
+                        const term = s?.terminalMission;
+                        if (!term) return;
+                        const outcome = String(term.objectiveOutcome || 'unresolved').toUpperCase();
+                        const color = { MET: '#00ff88', PARTIAL: '#ffaa00', BLOCKED: '#ff4444', UNTESTED: '#ff4444', UNRESOLVED: '#ffaa00' }[outcome] || '#ffaa00';
+                        cmdStatus.textContent = `Execution finished — objective: ${outcome}`;
+                        cmdStatus.style.color = color;
+                    }).catch(() => {});
+                }
                 if (typeof missionTimer !== 'undefined' && missionTimer) { clearInterval(missionTimer); missionTimer = null; }
                 missionStartTime = null;
                 try { if (typeof setFidelity === 'function') setFidelity('off'); } catch (_) {}

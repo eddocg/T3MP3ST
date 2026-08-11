@@ -9,11 +9,13 @@ import { randomUUID } from 'crypto';
 import {
   KillChainPhase,
   type Mission,
+  type MissionFamily,
   type MissionObjectiveClass,
   type MissionObjectiveOutcome,
   type Task,
   type TaskAttempt,
   type TaskResult,
+  type PhaseDisposition,
   type RulesOfEngagement,
   type OperatorArchetype,
 } from '../types/index.js';
@@ -148,10 +150,14 @@ export class TaskQueue extends EventEmitter<TaskQueueEvents> {
   updateStatus(taskId: string, status: Task['status'], result?: TaskResult): Task | undefined {
     const task = this.tasks.find(t => t.id === taskId);
     if (task) {
+      // `blocked` is a TERMINAL record (missing-fixture prerequisite): it must never transition
+      // back into dispatchable work — that would fabricate coverage the runtime cannot perform.
+      // When the operator supplies the fixture, the honest path is a NEW mission/attempt.
+      if (task.status === 'blocked') return undefined;
       task.status = status;
       if (result) task.result = result;
       if (status === 'in_progress') task.startedAt = Date.now();
-      if (status === 'completed' || status === 'failed') task.completedAt = Date.now();
+      if (status === 'completed' || status === 'failed' || status === 'blocked' || status === 'skipped') task.completedAt = Date.now();
     }
     return task;
   }
@@ -321,6 +327,7 @@ export class MissionControl extends EventEmitter<MissionEvents> {
     phases?: KillChainPhase[];
     rules?: RulesOfEngagement;
     objectiveClass?: MissionObjectiveClass;
+    missionFamily?: MissionFamily;
   }): Mission {
     const mission: Mission = {
       id: randomUUID(),
@@ -335,6 +342,7 @@ export class MissionControl extends EventEmitter<MissionEvents> {
       // Objective class is orthogonal to MissionFamily: detect from the objective text when not
       // explicitly supplied, so a narrow authorization directive binds which tasks get seeded.
       objectiveClass: params.objectiveClass ?? detectObjectiveClass(params.objectives.join(' ')),
+      missionFamily: params.missionFamily,
     };
 
     this.missions.set(mission.id, mission);
@@ -482,12 +490,17 @@ export class MissionControl extends EventEmitter<MissionEvents> {
       throw new Error(`Mission ${missionId} not found`);
     }
 
+    // Record the FINAL phase's truthful disposition before closing out.
+    this.recordPhaseDisposition(missionId);
+
     mission.status = 'completed';
     mission.completedAt = Date.now();
     mission.progress = 100;
     // Objective fidelity: completion is more than "task queue drained" — record whether the
     // objective actually received evidence (tested/blocked/unresolved), derived from the lane tasks.
-    mission.objectiveOutcome = deriveObjectiveOutcome(mission, this.taskQueue.getForMission(missionId));
+    const completion = deriveObjectiveCompletion(mission, this.taskQueue.getForMission(missionId));
+    mission.objectiveOutcome = completion.outcome;
+    mission.completionReason = completion.reason;
 
     if (this.activeMissionId === missionId) {
       this.activeMissionId = null;
@@ -496,6 +509,43 @@ export class MissionControl extends EventEmitter<MissionEvents> {
     this.emit('mission:completed', mission);
 
     return mission;
+  }
+
+  /**
+   * Record how the mission's CURRENT phase concluded — truthfully distinguishing real execution
+   * from "the objective lane had no work here". Idempotent per phase (re-recording replaces the
+   * prior entry for that phase). Called when leaving a phase (advance) and at completion.
+   */
+  recordPhaseDisposition(missionId: string): void {
+    const mission = this.missions.get(missionId);
+    if (!mission) return;
+    const phaseTasks = this.taskQueue.getForMission(missionId).filter((t) => t.phase === mission.currentPhase);
+    const count = (s: Task['status']) => phaseTasks.filter((t) => t.status === s).length;
+    const completed = count('completed');
+    const failed = count('failed');
+    const blocked = count('blocked');
+    const skipped = count('skipped');
+    const disposition: PhaseDisposition['disposition'] =
+      phaseTasks.length === 0 ? 'no_eligible_work'
+        : failed > 0 ? 'failed'
+          : completed > 0 ? 'executed'
+            : blocked > 0 ? 'blocked_prerequisite'
+              : 'no_eligible_work';
+    if (!mission.phaseDispositions) mission.phaseDispositions = [];
+    mission.phaseDispositions = [
+      ...mission.phaseDispositions.filter((d) => d.phase !== mission.currentPhase),
+      { phase: mission.currentPhase, disposition, total: phaseTasks.length, completed, failed, blocked, skipped, recordedAt: Date.now() },
+    ];
+  }
+
+  /**
+   * The most recently terminated (completed/aborted) mission — lets the status API keep serving a
+   * truthful terminal snapshot after the mission leaves the active slot. Never resurrects it live.
+   */
+  getLatestTerminalMission(): Mission | undefined {
+    return this.getAllMissions()
+      .filter((m) => m.status === 'completed' || m.status === 'aborted')
+      .sort((a, b) => (b.completedAt ?? 0) - (a.completedAt ?? 0))[0];
   }
 
   /**
@@ -824,6 +874,18 @@ export function createAuthorizationObjectiveTasks(missionId: string, targetAddre
     dependencies: [],
     createdAt: Date.now(),
   });
+  // A BLOCKED prerequisite is a terminal RECORD, not executable work: it must never be dispatched
+  // to an operator (an LLM narrating "this is blocked" is not a test, and a 'completed' terminal
+  // state would falsely read as objective coverage). It seeds as status 'blocked' and stays there.
+  const mkBlocked = (name: string, description: string, phase: KillChainPhase, priority: number): Task => ({
+    ...mk(name, description, phase, 'analyst', priority),
+    status: 'blocked',
+    // `required` stays at its default (true): this IS required objective work — honestly blocked by
+    // a missing fixture. The stall machinery keys on `failed`, and `blocked` is terminal, so this
+    // never stalls the mission; it terminates cleanly with objectiveOutcome blocked/partial.
+    completedAt: Date.now(),
+    result: { success: false, error: 'blocked: required fixture unavailable (see description)' },
+  });
 
   return [
     // ── Bounded prerequisite recon (labeled, minimal) — enumerate the API surface so authz
@@ -844,19 +906,17 @@ export function createAuthorizationObjectiveTasks(missionId: string, targetAddre
       9,
     ),
     // ── Explicit blocked prerequisite: second principal / differential cannot be fabricated ──
-    mk(
+    mkBlocked(
       'BLOCKED prerequisite: cross-principal differential (Principal B)',
       `lane:objective status:blocked-prerequisite. Cross-principal authorization testing (BOLA/BFLA) on ${targetAddress} requires a SECOND controlled principal (Principal B) with its own authenticated session, plus a known resource owned by Principal A. The runtime currently holds a single authenticated identity and no Principal/Resource fixture model, so a true A->B differential CANNOT be executed here. DO NOT substitute generic recon. Report this prerequisite as BLOCKED and request Principal B credentials / an owned-resource fixture from the operator.`,
       KillChainPhase.WEAPONIZE,
-      'analyst',
       9,
     ),
     // ── Explicit blocked prerequisite: lifecycle/state-transition differential ──
-    mk(
+    mkBlocked(
       'BLOCKED prerequisite: authorization lifecycle differential (revoke/downgrade -> replay)',
       `lane:objective status:blocked-prerequisite. Authorization-lifecycle testing on ${targetAddress} (authorized -> revoke/downgrade/expire -> replay identical request -> verify access disappears) requires a controlled state transition and a before/after differential executor. The runtime has no structured PRE->ACTION->STATE->RETEST->DIFF work order, so this cannot be executed here. Report as BLOCKED and request the state-change fixture (e.g. a revocable grant / role assignment) from the operator.`,
       KillChainPhase.WEAPONIZE,
-      'analyst',
       8,
     ),
   ];
@@ -868,20 +928,79 @@ export function createAuthorizationObjectiveTasks(missionId: string, targetAddre
  * produced supporting evidence is reported honestly as blocked/untested rather than complete.
  */
 export function deriveObjectiveOutcome(mission: Mission, tasks: Task[]): MissionObjectiveOutcome {
-  if (mission.objectiveClass !== 'authorization_lifecycle') return 'met';
+  return deriveObjectiveCompletion(mission, tasks).outcome;
+}
 
+export interface ObjectiveCompletion {
+  outcome: MissionObjectiveOutcome;
+  /** Plain-language, redaction-safe reason for the outcome (fixture names only — never secrets). */
+  reason: string;
+  /** Objective-lane tasks that could not execute because a required fixture is missing. */
+  blockedPrerequisites: Array<{ id: string; name: string; reason: string }>;
+  /** Prerequisite/objective-lane tasks that DID run to completion (e.g. API inventory, baselines). */
+  completedPrerequisites: Array<{ id: string; name: string }>;
+}
+
+/**
+ * Full objective-completion assessment: outcome + auditable reason + the blocked/completed
+ * prerequisite breakdown. Single source of truth used by completeMission, the status endpoint,
+ * and the mission-context ledger so all three tell the SAME story.
+ */
+export function deriveObjectiveCompletion(mission: Mission, tasks: Task[]): ObjectiveCompletion {
   const laneTasks = tasks.filter((t) => t.description.includes('[objective:authorization_lifecycle]'));
+  const isBlocked = (t: Task) => t.status === 'blocked' || t.description.includes('status:blocked-prerequisite');
   const objectiveTasks = laneTasks.filter((t) => t.description.includes('lane:objective'));
-  const blockedPrereqs = objectiveTasks.filter((t) => t.description.includes('status:blocked-prerequisite'));
-  const ranObjective = objectiveTasks.filter((t) =>
-    !t.description.includes('status:blocked-prerequisite') && t.status === 'completed',
-  );
+  const blockedPrereqTasks = laneTasks.filter(isBlocked);
+  const ranObjective = objectiveTasks.filter((t) => !isBlocked(t) && t.status === 'completed');
+  const completedLane = laneTasks.filter((t) => !isBlocked(t) && t.status === 'completed');
+
+  const blockedPrerequisites = blockedPrereqTasks.map((t) => ({
+    id: t.id,
+    name: t.name,
+    reason: t.result?.error || 'required fixture unavailable (see task description)',
+  }));
+  const completedPrerequisites = completedLane.map((t) => ({ id: t.id, name: t.name }));
+
+  if (mission.objectiveClass !== 'authorization_lifecycle') {
+    return {
+      outcome: 'met',
+      reason: 'general mission — full kill-chain coverage (no narrow objective gate)',
+      blockedPrerequisites,
+      completedPrerequisites,
+    };
+  }
 
   // A missing second principal / state fixture means the central hypothesis could not be exercised.
-  if (blockedPrereqs.length > 0 && ranObjective.length === 0) return 'blocked';
-  if (ranObjective.length === 0) return 'untested';
+  if (blockedPrerequisites.length > 0 && ranObjective.length === 0) {
+    return {
+      outcome: 'blocked',
+      reason: 'objective blocked: missing controlled secondary principal / owned-resource / state-transition fixture — only bounded prerequisites ran',
+      blockedPrerequisites,
+      completedPrerequisites,
+    };
+  }
+  if (ranObjective.length === 0) {
+    return {
+      outcome: 'untested',
+      reason: 'objective lane never produced completed work',
+      blockedPrerequisites,
+      completedPrerequisites,
+    };
+  }
   // Current-principal baselines ran, but the differential/lifecycle prerequisites stayed blocked:
   // the objective was only partially exercised.
-  if (blockedPrereqs.length > 0) return 'partial';
-  return 'partial';
+  if (blockedPrerequisites.length > 0) {
+    return {
+      outcome: 'partial',
+      reason: 'current-principal baseline completed; cross-principal / lifecycle differentials blocked on missing fixtures — no multi-principal coverage claimed',
+      blockedPrerequisites,
+      completedPrerequisites,
+    };
+  }
+  return {
+    outcome: 'partial',
+    reason: 'objective lane ran without a full differential matrix — single-principal coverage only',
+    blockedPrerequisites,
+    completedPrerequisites,
+  };
 }

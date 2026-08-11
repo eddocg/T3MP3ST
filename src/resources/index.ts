@@ -1,14 +1,7 @@
-export type MissionFamily =
-  | 'web_api'
-  | 'ai_red_team'
-  | 'cloud_infra'
-  | 'smart_contract'
-  | 'code_supply_chain'
-  | 'crypto_secrets'
-  | 'reverse_binary'
-  | 'agent_warfare'
-  | 'social_osint'
-  | 'reporting_remediation';
+// Canonical definition lives in types/index.ts — imported here for local use and re-exported for
+// backward compatibility (existing importers of MissionFamily from resources keep working).
+import type { MissionFamily } from '../types/index.js';
+export type { MissionFamily };
 
 export interface WorkflowPreset {
   id: string;

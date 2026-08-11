@@ -144,6 +144,16 @@ export function clearRuntimeTargetHeaders(): void {
 }
 
 /**
+ * Redaction-safe auth-context metadata for snapshots/ledgers: whether a credential context is
+ * bound, the exact origin it is bound to, and the header NAMES only. NEVER returns values.
+ */
+export function runtimeTargetHeaderMetadata(): { present: boolean; origin: string | null; headerNames: string[] } {
+  const config = parseTargetHeaderConfig();
+  if (!config) return { present: false, origin: null, headerNames: [] };
+  return { present: [...config.headers.keys()].length > 0, origin: config.origin, headerNames: [...config.headers.keys()] };
+}
+
+/**
  * Push the active binding's literal header VALUES into the central redactor registry so that EVERY
  * persistence/export/SSE/ledger boundary (all of which route through redactString/redactSecrets) strips
  * the raw secret — not just arsenal tool results via redactConfiguredSecrets. Resolves runtime-override-

@@ -366,9 +366,55 @@ export interface Mission {
    * reflect how much of the objective hypothesis space was exercised.
    */
   objectiveOutcome?: MissionObjectiveOutcome;
+  /** Why the mission terminated the way it did (plain-language, redaction-safe). Set at completion. */
+  completionReason?: string;
+  /**
+   * The routed MissionFamily at launch (e.g. 'web_api'). Informational only — used so durable
+   * ledger records (hypotheses/work orders) land in the correct lane. Optional for backward compat.
+   */
+  missionFamily?: MissionFamily;
+  /**
+   * Truthful per-phase disposition recorded as the mission LEAVES each phase. A phase with no
+   * eligible work in the mission's objective lane is recorded `no_eligible_work` — never presented
+   * as if it were normally executed. Phases whose objective work was blocked on a missing fixture
+   * are recorded `blocked_prerequisite`.
+   */
+  phaseDispositions?: PhaseDisposition[];
+}
+
+/** Truthful record of how a kill-chain phase concluded for a mission. */
+export interface PhaseDisposition {
+  phase: KillChainPhase;
+  /** executed = real tasks ran; blocked_prerequisite = objective work blocked on missing fixture;
+   *  no_eligible_work = the objective lane had no work for this phase (NOT a successful execution);
+   *  failed = required work failed (mission stalled). */
+  disposition: 'executed' | 'blocked_prerequisite' | 'no_eligible_work' | 'failed';
+  total: number;
+  completed: number;
+  failed: number;
+  blocked: number;
+  skipped: number;
+  recordedAt: number;
 }
 
 export type MissionObjectiveClass = 'general' | 'authorization_lifecycle';
+
+/**
+ * The routed mission family taxonomy (canonical home — re-exported by resources/index.ts for
+ * backward compatibility). Orthogonal to MissionObjectiveClass: a `web_api` mission may carry an
+ * `authorization_lifecycle` objective.
+ */
+export type MissionFamily =
+  | 'web_api'
+  | 'ai_red_team'
+  | 'cloud_infra'
+  | 'smart_contract'
+  | 'code_supply_chain'
+  | 'crypto_secrets'
+  | 'reverse_binary'
+  | 'agent_warfare'
+  | 'social_osint'
+  | 'reporting_remediation';
 
 export type MissionObjectiveOutcome =
   | 'untested'
@@ -420,7 +466,13 @@ export interface Task {
   description: string;
   phase: KillChainPhase;
   operatorType: OperatorArchetype;
-  status: 'pending' | 'assigned' | 'in_progress' | 'completed' | 'failed' | 'skipped';
+  /**
+   * Lifecycle. `blocked` is a TERMINAL record state: the task represents objective work that cannot
+   * execute because a required fixture (e.g. a second controlled principal / owned resource / state
+   * transition) is unavailable. Blocked tasks are NEVER dispatched to operators, never hold a phase
+   * open, and never become `completed` — they exist so the blocker is durable and auditable.
+   */
+  status: 'pending' | 'assigned' | 'in_progress' | 'completed' | 'failed' | 'skipped' | 'blocked';
   priority: number;
   dependencies: string[];
   assignedTo?: string;
@@ -621,6 +673,12 @@ export interface TempestConfig {
   objectiveClass?: MissionObjectiveClass;
   /** Free-text operator directive emphasis that steers the objective lane (advisory). */
   objectiveDirective?: string;
+  /**
+   * The routed MissionFamily for this run (e.g. 'web_api') — informational; stored on the Mission so
+   * durable ledger records (hypotheses/work orders) are filed in the correct lane. Does NOT steer
+   * task seeding (that is objectiveClass's job).
+   */
+  missionFamily?: MissionFamily;
   operators?: {
     maxConcurrent?: number;
     defaultConfig?: Partial<OperatorConfig>;
@@ -733,6 +791,14 @@ export interface CommandEvents {
   'target:owned': { target: Target; operatorId: string };
   'detection:triggered': DetectionEvent;
   'mission:phase_changed': { missionId: string; phase: KillChainPhase };
+  /** Mission reached a terminal completed state — carries the mission so the server can persist a
+   *  redaction-safe terminal snapshot for post-completion audit. */
+  'mission:completed': Mission;
+  /** Mission was aborted/stopped by the operator — terminal, distinct from completed. */
+  'mission:aborted': { mission: Mission; reason: string };
+  /** A mission task was created (including terminal `blocked` prerequisite records) — lets the
+   *  server materialize durable ledger entries for blockers without inventing a parallel system. */
+  'task:created': Task;
   'scan:progress': ScanProgressEvent;
   'abort:recommended': string;
   /** A capability-approval gate decision (allowed/denied) on an intrusive/dangerous tool — bridged to

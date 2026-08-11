@@ -32,7 +32,8 @@ import { AI_REDTEAM_PLAYBOOK, AI_REDTEAM_TECHNIQUE_IDS, aiRedTeamBriefing } from
 import { OPERATOR_SYSTEM_PROMPTS, PLINIAN_OPERATOR_DOCTRINE, THE_FIXER_SYSTEM_PROMPT } from './prompts/index.js';
 import { createTargetFromUrl, createTargetFromIP } from './target/index.js';
 import { setRuntimeTargetHeaders, clearRuntimeTargetHeaders } from './arsenal/index.js';
-import type { OperatorArchetype, LLMProvider } from './types/index.js';
+import { runtimeTargetHeaderMetadata } from './arsenal/index.js';
+import type { OperatorArchetype, LLMProvider, Task, Mission } from './types/index.js';
 import { listOperatorPrompts, setOperatorOverride, resetOperatorOverride, type OperatorOverride } from './operators/index.js';
 import { ingestRepoToSourceContext, runWhiteboxAnalysis, resolveRepoSourceForAnalysis, RepoCloneError, RepoPathError } from './recon/whitebox.js';
 import { initGrammars } from './recon/ts-grammars.js';
@@ -337,7 +338,7 @@ function sanitizeLocalBaseUrl(raw: unknown): { ok: true; value: string | null } 
   return { ok: true, value: v };
 }
 
-function createTempestCommandInstance(missionName: string, apiKey: string | undefined, provider: string, model: string, baseUrl?: string, objective?: { objectiveClass?: import('./types/index.js').MissionObjectiveClass; objectiveDirective?: string }): TempestCommand {
+function createTempestCommandInstance(missionName: string, apiKey: string | undefined, provider: string, model: string, baseUrl?: string, objective?: { objectiveClass?: import('./types/index.js').MissionObjectiveClass; objectiveDirective?: string; missionFamily?: import('./types/index.js').MissionFamily }): TempestCommand {
   // Tear down previous instance
   if (tempestCommand) {
     tempestCommand.stop();
@@ -349,6 +350,7 @@ function createTempestCommandInstance(missionName: string, apiKey: string | unde
     name: missionName,
     objectiveClass: objective?.objectiveClass,
     objectiveDirective: objective?.objectiveDirective,
+    missionFamily: objective?.missionFamily,
     llm: {
       provider: provider as any,
       model,
@@ -376,7 +378,125 @@ function createTempestCommandInstance(missionName: string, apiKey: string | unde
     }
   });
 
+  // Materialize terminal `blocked` prerequisite tasks into the DURABLE ledgers (hypothesis +
+  // blocked work order) so the blocker outlives the ephemeral task queue and is visible in
+  // /api/mission-context/latest. This is NOT a vulnerability finding — it is an honest record
+  // that objective work could not execute because a required fixture is missing.
+  tempestCommand.on('task:created', (task) => {
+    try {
+      if (task.status === 'blocked') materializeBlockedPrerequisite(task, tempestCommand);
+    } catch (err) {
+      console.error('[T3MP3ST] failed to materialize blocked prerequisite:', err instanceof Error ? err.message : err);
+    }
+  });
+
+  // Persist a redaction-safe terminal snapshot when the mission terminates, so the objective
+  // outcome survives both the active-slot handoff AND process restarts.
+  tempestCommand.on('mission:completed', (mission) => {
+    try { recordTerminalMissionSnapshot(mission as Mission, 'completed', tempestCommand); } catch (err) {
+      console.error('[T3MP3ST] failed to snapshot completed mission:', err instanceof Error ? err.message : err);
+    }
+  });
+  tempestCommand.on('mission:aborted', ({ mission }) => {
+    try { recordTerminalMissionSnapshot(mission as Mission, 'aborted', tempestCommand); } catch (err) {
+      console.error('[T3MP3ST] failed to snapshot aborted mission:', err instanceof Error ? err.message : err);
+    }
+  });
+
   return tempestCommand;
+}
+
+/**
+ * Build + persist the terminal mission snapshot. All free text passes redactLedgerText; auth
+ * context is header NAMES only. Persisted via the normal debounced state snapshot.
+ */
+function recordTerminalMissionSnapshot(mission: Mission, status: 'completed' | 'aborted', cmd: TempestCommand | null): void {
+  const tasks = cmd ? cmd.mission.getTaskQueue().getForMission(mission.id) : [];
+  const count = (s: string) => tasks.filter((t) => t.status === s).length;
+  const completion = deriveObjectiveCompletion(mission, tasks);
+  const auth = runtimeTargetHeaderMetadata();
+  const snapshot: TerminalMissionSnapshot = {
+    id: mission.id,
+    name: redactLedgerText(mission.name, 240),
+    status,
+    family: mission.missionFamily,
+    objectiveClass: mission.objectiveClass ?? 'general',
+    objectiveOutcome: mission.objectiveOutcome,
+    completionReason: mission.completionReason ? redactLedgerText(mission.completionReason, 500) : undefined,
+    finalPhase: mission.currentPhase,
+    progress: mission.progress,
+    startedAt: mission.startedAt,
+    completedAt: mission.completedAt,
+    phaseDispositions: (mission.phaseDispositions ?? []).map((d) => ({
+      phase: d.phase, disposition: d.disposition, total: d.total,
+      completed: d.completed, failed: d.failed, blocked: d.blocked, skipped: d.skipped,
+    })),
+    taskSummary: {
+      total: tasks.length,
+      completed: count('completed'),
+      failed: count('failed'),
+      skipped: count('skipped'),
+      blocked: count('blocked'),
+      retried: tasks.filter((t) => (t.attempts?.length ?? 0) > 1).length,
+    },
+    blockedPrerequisites: completion.blockedPrerequisites.map((p) => ({ ...p, name: redactLedgerText(p.name, 240), reason: redactLedgerText(p.reason, 500) })),
+    completedPrerequisites: completion.completedPrerequisites.map((p) => ({ ...p, name: redactLedgerText(p.name, 240) })),
+    authContext: { present: auth.present, origin: auth.origin, headerNames: auth.headerNames },
+    recordedAt: nowIso(),
+  };
+  terminalMissionLedger.set(snapshot.id, snapshot);
+  schedulePersist('mission.terminal_snapshot');
+}
+
+/**
+ * Persist a blocked-prerequisite objective task as a durable hypothesis (open/untested) + a
+ * blocked work order. Idempotent per task id. Redaction-safe: names/reasons only — never secrets.
+ */
+function materializeBlockedPrerequisite(task: Task, cmd: TempestCommand | null): void {
+  const mission = cmd?.mission.getMission(task.missionId);
+  const family = normalizeMissionFamily(mission?.missionFamily, 'web_api');
+  const target = cmd?.targetEnv.getAllTargets()[0]?.address ?? '';
+  const now = nowIso();
+  const hypothesisId = `hyp-blocked-${task.id}`;
+  const workOrderId = `work-blocked-${task.id}`;
+  if (hypothesisLedger.has(hypothesisId) || workOrderLedger.has(workOrderId)) return; // already materialized
+
+  const claimText = redactLedgerText(task.name.replace(/^BLOCKED prerequisite:\s*/i, '').trim() || task.name, 240);
+  const rationale = redactLedgerText(task.description.replace(/\[objective:[^\]]+\]\s*/, '').trim(), 1000);
+  const hypothesis: HypothesisRecord = {
+    id: hypothesisId,
+    missionId: task.missionId,
+    operationId: undefined,
+    family,
+    target: normalizeTargetValue(target),
+    claim: claimText,
+    rationale,
+    status: 'open', // untested — the fixture needed to test it is missing
+    confidence: 0.5,
+    evidenceForIds: [],
+    evidenceAgainstIds: [],
+    findingIds: [],
+    nextTests: [],
+    createdAt: now,
+    updatedAt: now,
+  };
+  hypothesisLedger.set(hypothesis.id, hypothesis);
+
+  const order = createWorkOrder({
+    id: workOrderId,
+    missionId: task.missionId,
+    family,
+    kind: 'tool_probe',
+    title: redactLedgerText(task.name, 240),
+    objective: rationale,
+    target,
+    status: 'blocked',
+    requiresReceipt: false,
+    resultSummary: redactLedgerText(task.result?.error || 'blocked: required fixture unavailable', 500),
+  }, hypothesis);
+  workOrderLedger.set(order.id, order);
+  emitContractEvent('work_order.created', { workOrderId: order.id, hypothesisId: hypothesis.id, status: 'blocked' });
+  schedulePersist('blocked_prerequisite.materialized');
 }
 
 // =============================================================================
@@ -866,6 +986,33 @@ const workOrderLedger = new Map<string, WorkOrderRecord>();
  * Consumers may only use it to surface "already tested (boundary held)" context to the operator.
  */
 const boundaryHeldLedger = new Map<string, BoundaryHeldRecord>();
+
+/**
+ * TERMINAL MISSION SNAPSHOTS — a redaction-safe audit record retained AFTER a mission completes or
+ * aborts (and persisted across restarts). Missions themselves are in-memory only; without this, the
+ * objective outcome / blocked-prerequisite story evaporates with the process. Contains names,
+ * reasons, counts, and auth-context METADATA (header names only) — NEVER credential values.
+ */
+interface TerminalMissionSnapshot {
+  id: string;
+  name: string;
+  status: 'completed' | 'aborted';
+  family?: string;
+  objectiveClass: string;
+  objectiveOutcome?: string;
+  completionReason?: string;
+  finalPhase: string;
+  progress: number;
+  startedAt?: number;
+  completedAt?: number;
+  phaseDispositions: Array<{ phase: string; disposition: string; total: number; completed: number; failed: number; blocked: number; skipped: number }>;
+  taskSummary: { total: number; completed: number; failed: number; skipped: number; blocked: number; retried: number };
+  blockedPrerequisites: Array<{ id: string; name: string; reason: string }>;
+  completedPrerequisites: Array<{ id: string; name: string }>;
+  authContext: { present: boolean; origin: string | null; headerNames: string[] };
+  recordedAt: string;
+}
+const terminalMissionLedger = new Map<string, TerminalMissionSnapshot>();
 const watchCycleLedger = new Map<string, WatchCycleRecord>();
 const memoryCapsule = new Map<string, MemoryEntry>();
 const memoryProposals = new Map<string, MemoryProposal>();
@@ -882,6 +1029,8 @@ function upsertMissionFindingToLedger(finding: {
   description?: string;
   severity?: unknown;
   targetId?: string;
+  evidence?: Array<{ type?: string; content?: string; timestamp?: number }>;
+  verifyGate?: { provenance?: string };
 }, missionId?: string): void {
   const title = typeof finding.title === 'string' && finding.title.trim() ? finding.title.trim() : 'Untitled finding';
   const target = normalizeTargetValue(finding.targetId);
@@ -895,10 +1044,41 @@ function upsertMissionFindingToLedger(finding: {
     ? redactLedgerText(finding.description.trim())
     : 'Claim pending evidence review.';
 
+  // Mirror the finding's tool evidence into the durable evidenceLedger so a finding never sits
+  // evidence-less (the mission-context "findings_without_evidence" gap). Content passes through
+  // the central redactor; provenance reflects the live verification gate, never inflated.
+  const mirrorEvidence = (record: FindingRecord): void => {
+    if (!Array.isArray(finding.evidence) || finding.evidence.length === 0) return;
+    if (record.evidenceIds.length > 0) return; // already mirrored — don't duplicate on upsert
+    const strength: EvidenceProvenanceStrength = finding.verifyGate?.provenance === 'tool' ? 'tool' : 'context';
+    const typeMap: Record<string, EvidenceType> = {
+      screenshot: 'screenshot', log: 'log', command: 'command',
+      request: 'artifact', response: 'artifact', file: 'artifact', output: 'log',
+    };
+    for (const ev of finding.evidence.slice(0, 8)) {
+      const entry: EvidenceEntry = {
+        id: newId('evidence'),
+        missionId: record.missionId,
+        operationId: record.operationId,
+        findingId: record.id,
+        type: typeMap[String(ev?.type || 'output')] ?? 'log',
+        title: redactLedgerText(`Evidence for: ${record.title}`, 240),
+        summary: redactLedgerText(typeof ev?.content === 'string' ? ev.content : '', 1200),
+        source: 'tool',
+        provenanceStrength: strength,
+        resourceIds: [],
+        createdAt: now,
+      };
+      evidenceLedger.set(entry.id, entry);
+      record.evidenceIds.push(entry.id);
+    }
+  };
+
   if (existing) {
     existing.severity = severity;
     existing.claim = claim;
     if (missionId) existing.missionId = missionId;
+    mirrorEvidence(existing);
     existing.updatedAt = now;
     findingsLedger.set(existing.id, existing);
     return;
@@ -924,6 +1104,7 @@ function upsertMissionFindingToLedger(finding: {
     updatedAt: now,
     retestIds: [],
   };
+  mirrorEvidence(record);
   findingsLedger.set(record.id, record);
 }
 
@@ -1141,6 +1322,7 @@ function buildStateSnapshot(): Record<string, unknown> {
     hypothesisLedger: [...hypothesisLedger.values()],
     workOrderLedger: [...workOrderLedger.values()],
     boundaryHeldLedger: [...boundaryHeldLedger.values()],
+    terminalMissionLedger: [...terminalMissionLedger.values()],
     watchCycleLedger: [...watchCycleLedger.values()],
     memoryCapsule: [...memoryCapsule.values()],
     memoryProposals: [...memoryProposals.values()],
@@ -1212,6 +1394,7 @@ async function loadPersistedState(): Promise<void> {
     replaceMapContents(hypothesisLedger, state.hypothesisLedger);
     replaceMapContents(workOrderLedger, state.workOrderLedger);
     replaceMapContents(boundaryHeldLedger, state.boundaryHeldLedger);
+    replaceMapContents(terminalMissionLedger, state.terminalMissionLedger);
     replaceMapContents(watchCycleLedger, state.watchCycleLedger);
     replaceMapContents(memoryCapsule, state.memoryCapsule);
     replaceMapContents(memoryProposals, state.memoryProposals);
@@ -1871,15 +2054,23 @@ function latestMissionContext(): Record<string, unknown> {
 
   const latest = records[0];
   if (!latest) {
-    return {
+    // No ledger records — still surface the mission's objective context when a mission exists
+    // (e.g. a completed run whose lane produced no findings), so the outcome is never invisible.
+    // Falls back to the PERSISTED terminal snapshot when the in-memory mission is gone (restart).
+    const cmd0 = getTempestCommand();
+    const terminal0 = cmd0?.mission.getActiveMission() ?? cmd0?.mission.getLatestTerminalMission();
+    const snap0 = terminal0 ? undefined : latestTerminalSnapshot();
+    const objective0 = terminal0 ? liveObjectiveBlock(terminal0, cmd0!) : snap0 ? snapshotObjectiveBlock(snap0) : null;
+    return redactSecrets({
       schema_version: 't3mp3st_mission_context/v1',
-      missionId: null,
+      missionId: terminal0?.id ?? snap0?.id ?? null,
       operationId: null,
-      family: null,
+      family: terminal0?.missionFamily ?? snap0?.family ?? null,
       counts: { hypotheses: 0, workOrders: 0, evidence: 0, findings: 0, retests: 0 },
+      objective: objective0,
       laneSummary: [],
       latestRecord: null,
-    };
+    }) as Record<string, unknown>;
   }
 
   const missionId = latest.missionId || '';
@@ -1901,6 +2092,16 @@ function latestMissionContext(): Record<string, unknown> {
   );
   const laneSummary = missionLaneSummary({ hypotheses, workOrders, findings, retests });
 
+  // Objective context: pull the mission's own record (objective class, outcome, why, blocked vs
+  // completed prerequisites, truthful phase dispositions) so a reviewer can see WHY the objective
+  // did or didn't execute without reverse-engineering screenshots. Redaction-safe: names/reasons
+  // only — never credential material. Falls back to the PERSISTED terminal snapshot when the
+  // in-memory mission is gone (process restart).
+  const cmd = getTempestCommand();
+  const missionRecord = (missionId && cmd?.mission.getMission(missionId)) || cmd?.mission.getLatestTerminalMission();
+  const snap = missionRecord ? undefined : ((missionId && terminalMissionLedger.get(missionId)) || latestTerminalSnapshot());
+  const objective = missionRecord ? liveObjectiveBlock(missionRecord, cmd!) : snap ? snapshotObjectiveBlock(snap) : null;
+
   return redactSecrets({
     schema_version: 't3mp3st_mission_context/v1',
     missionId: missionId || null,
@@ -1913,6 +2114,7 @@ function latestMissionContext(): Record<string, unknown> {
       findings: findings.length,
       retests: retests.length,
     },
+    objective,
     laneSummary,
     latestRecord: {
       id: latest.id,
@@ -1920,6 +2122,48 @@ function latestMissionContext(): Record<string, unknown> {
       ts: latest.ts,
     },
   }) as Record<string, unknown>;
+}
+
+/** The most recent persisted terminal mission snapshot (by completion time). */
+function latestTerminalSnapshot(): TerminalMissionSnapshot | undefined {
+  return [...terminalMissionLedger.values()]
+    .sort((a, b) => (b.completedAt ?? 0) - (a.completedAt ?? 0))[0];
+}
+
+/** Objective block for mission-context, from the LIVE (in-memory) mission + task queue. */
+function liveObjectiveBlock(mission: Mission, cmd: TempestCommand): Record<string, unknown> {
+  const tasks = cmd.mission.getTaskQueue().getForMission(mission.id);
+  const completion = deriveObjectiveCompletion(mission, tasks);
+  const auth = runtimeTargetHeaderMetadata();
+  return {
+    class: mission.objectiveClass ?? 'general',
+    outcome: mission.objectiveOutcome ?? null,
+    completionReason: mission.completionReason ?? null,
+    missionStatus: mission.status,
+    blockedPrerequisites: completion.blockedPrerequisites,
+    completedPrerequisites: completion.completedPrerequisites,
+    phaseDispositions: (mission.phaseDispositions ?? []).map(d => ({
+      phase: d.phase, disposition: d.disposition, total: d.total,
+      completed: d.completed, failed: d.failed, blocked: d.blocked, skipped: d.skipped,
+    })),
+    // Redaction-safe auth-context metadata: whether a credential context is bound and the header
+    // NAMES only — never values. Lets a reviewer answer "were credentials configured?" honestly.
+    authContext: { present: auth.present, origin: auth.origin, headerNames: auth.headerNames, count: auth.headerNames.length },
+  };
+}
+
+/** Objective block for mission-context, from a PERSISTED terminal snapshot (post-restart). */
+function snapshotObjectiveBlock(snap: TerminalMissionSnapshot): Record<string, unknown> {
+  return {
+    class: snap.objectiveClass,
+    outcome: snap.objectiveOutcome ?? null,
+    completionReason: snap.completionReason ?? null,
+    missionStatus: snap.status,
+    blockedPrerequisites: snap.blockedPrerequisites,
+    completedPrerequisites: snap.completedPrerequisites,
+    phaseDispositions: snap.phaseDispositions,
+    authContext: { ...snap.authContext, count: snap.authContext.headerNames.length },
+  };
 }
 
 function workOrderSquadForFamily(family: MissionFamily): string {
@@ -6747,16 +6991,28 @@ app.post('/api/mission/tasks/:id/skip', (req: Request, res: Response): void => {
 app.get('/api/mission/status', (_req: Request, res: Response) => {
   const cmd = getTempestCommand();
   if (!cmd) {
-    res.json({ active: false, progress: [], tasks: [] });
+    // No live command — still serve the latest PERSISTED terminal snapshot (survives restarts) so
+    // a finished mission remains auditable. active stays false; this never resurrects a mission.
+    const snap = latestTerminalSnapshot();
+    res.json(redactSecrets({ active: false, state: snap ? snap.status === 'completed' ? 'completed' : 'aborted' : 'idle', progress: [], tasks: [], terminalMission: snap ?? null }));
     return;
   }
 
   const status = cmd.getStatus();
-  const mission = cmd.mission.getActiveMission();
+  // After completion the mission leaves the active slot — fall back to the latest terminal mission
+  // so the response retains the objective/outcome audit trail instead of going null.
+  const mission = cmd.mission.getActiveMission() ?? cmd.mission.getLatestTerminalMission();
   const findings = cmd.vault.getAllFindings();
   const allOperators = cmd.cell.getAllOperators().map(op => op.getSummary());
+  const isTerminalView = !cmd.mission.getActiveMission() && !!mission;
+  // Prefer the in-memory terminal snapshot; fall back to the persisted ledger (e.g. the mission
+  // completed in a prior process and only the durable record remains). Never shown while a mission
+  // is LIVE — a stale terminal panel must not sit next to an active run.
+  const terminalMission = cmd.mission.getActiveMission()
+    ? null
+    : (status.terminalMission ?? latestTerminalSnapshot() ?? null);
 
-  res.json({
+  res.json(redactSecrets({
     active: status.running,
     paused: status.paused,
     stallReason: status.stallReason,
@@ -6775,11 +7031,20 @@ app.get('/api/mission/status', (_req: Request, res: Response) => {
       currentPhase: mission.currentPhase,
       progress: mission.progress,
       startedAt: mission.startedAt,
+      completedAt: mission.completedAt,
+      // True when this mission block is a TERMINAL snapshot (mission finished) rather than a live
+      // mission — the UI must not render it as resumable/live.
+      terminal: isTerminalView,
       // Objective fidelity: the research objective class (orthogonal to family) and whether the
       // objective actually received evidence (tested/blocked/partial), not merely "tasks drained".
       objectiveClass: mission.objectiveClass ?? 'general',
       objectiveOutcome: mission.objectiveOutcome,
+      completionReason: mission.completionReason,
+      family: mission.missionFamily,
+      phaseDispositions: mission.phaseDispositions ?? [],
     } : null,
+    // Durable terminal audit: objective outcome, why, what was blocked, what completed.
+    terminalMission,
     operators: {
       summary: status.operators,
       details: allOperators,
@@ -6797,7 +7062,7 @@ app.get('/api/mission/status', (_req: Request, res: Response) => {
       operatorId: f.operatorId,
       discoveredAt: f.discoveredAt,
     })),
-  });
+  }));
 });
 
 /**
@@ -7114,7 +7379,7 @@ function resolveGeneralLLMConfig(provider: string | undefined, model: string | u
 function bringUpMissionFromPlan(
   execConfig: { missionName: string; targets: string[]; operators: string[] },
   generalConfig: { apiKey?: string; provider: any; model: string; baseUrl?: string },
-  objective?: { objectiveClass?: import('./types/index.js').MissionObjectiveClass; objectiveDirective?: string },
+  objective?: { objectiveClass?: import('./types/index.js').MissionObjectiveClass; objectiveDirective?: string; missionFamily?: import('./types/index.js').MissionFamily },
 ): { spawnedOps: Array<{ id: string; callsign: string; archetype: string }>; status: any } {
   const cmd = createTempestCommandInstance(execConfig.missionName, generalConfig.apiKey, generalConfig.provider, generalConfig.model, generalConfig.baseUrl, objective);
   for (const target of execConfig.targets) {
@@ -7821,7 +8086,7 @@ app.post('/api/attack-graph/ingest', (req: Request, res: Response): void => {
 // =============================================================================
 
 import { Admiral, briefToDirective, type ChatMsg, type MissionBrief } from './admiral/index.js';
-import { detectObjectiveClass } from './mission/index.js';
+import { detectObjectiveClass, deriveObjectiveCompletion } from './mission/index.js';
 
 /**
  * POST /api/admiral/converse — one conversational turn with the Admiral.
@@ -7997,6 +8262,9 @@ app.post('/api/admiral/launch', async (req: Request, res: Response): Promise<voi
       // blocked prerequisites) instead of the generic recon battery. Orthogonal to MissionFamily.
       objectiveClass: detectObjectiveClass(`${directive.objective} ${directive.constraints ?? ''}`),
       objectiveDirective: directive.objective,
+      // The routed family (from the plan) is stored on the mission so durable ledger records land
+      // in the correct lane — informational only, never steers seeding.
+      missionFamily: (plan as { missionFamily?: string }).missionFamily as import('./types/index.js').MissionFamily | undefined,
     });
     res.json({
       mode: 'live', plan, review: execConfig.review,

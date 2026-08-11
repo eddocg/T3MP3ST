@@ -227,7 +227,7 @@ import { OperatorCell, OperatorAgent, ARCHETYPE_PROFILES, PHASE_ARCHETYPES, KILL
 import { PackBoard } from './pack/board.js';
 import { randomUUID } from 'node:crypto';
 import { createPrivateReportWorkspace, readPrivateToolReport } from './arsenal/report-workspace.js';
-import { MissionControl, TaskQueue } from './mission/index.js';
+import { MissionControl, TaskQueue, deriveObjectiveCompletion } from './mission/index.js';
 import { TargetEnvironment } from './target/index.js';
 import { EvidenceVault } from './evidence/index.js';
 import {
@@ -336,6 +336,7 @@ export class TempestCommand extends EventEmitter<CommandEvents> {
   private readonly taskTimeoutMs: number;
   private readonly objectiveClass: import('./types/index.js').MissionObjectiveClass;
   private readonly objectiveDirective?: string;
+  private readonly missionFamily?: import('./types/index.js').MissionFamily;
 
   /**
    * White-box source context (security-prioritized code excerpt), set by the
@@ -372,6 +373,7 @@ export class TempestCommand extends EventEmitter<CommandEvents> {
     this.hooks = config.hooks || {};
     this.objectiveClass = config.objectiveClass ?? 'general';
     this.objectiveDirective = config.objectiveDirective;
+    this.missionFamily = config.missionFamily;
     this.taskTimeoutMs = TempestCommand.resolveTaskTimeoutMs(config.llm.provider);
 
     // Initialize LLM backbone
@@ -517,21 +519,29 @@ export class TempestCommand extends EventEmitter<CommandEvents> {
     });
 
     // Forward mission events
-    this.mission.on('mission:completed', () => {
+    this.mission.on('mission:completed', (mission) => {
       // Mark completion BEFORE stop() flips running=false, so getRunState() can distinguish a
       // genuine 'completed' terminal state from a bare 'idle'/stopped command (never collapse
       // active:false into completed, and never collapse completed into aborted).
       this.completedFlag = true;
+      this.emit('mission:completed', mission);
       this.stop();
     });
 
-    this.mission.on('mission:aborted', () => {
+    this.mission.on('mission:aborted', ({ mission, reason }) => {
+      this.emit('mission:aborted', { mission, reason });
       this.stop();
     });
 
     this.mission.on('mission:phase_changed', ({ mission, newPhase }) => {
       this.emit('mission:phase_changed', { missionId: mission.id, phase: newPhase });
       this.hooks.onMissionPhaseChange?.(mission.id, newPhase);
+    });
+
+    // Forward task creation so the server can materialize durable ledger records for terminal
+    // `blocked` prerequisite tasks (the blocker must outlive the ephemeral task queue).
+    this.mission.on('task:created', (task) => {
+      this.emit('task:created', task);
     });
 
     // Auto-generate tasks when a target is added to an active mission.
@@ -842,6 +852,7 @@ export class TempestCommand extends EventEmitter<CommandEvents> {
         ? [this.objectiveDirective, 'Enumerate attack surface', 'Identify vulnerabilities', 'Validate findings']
         : ['Enumerate attack surface', 'Identify vulnerabilities', 'Validate findings'],
       objectiveClass: this.objectiveClass,
+      missionFamily: this.missionFamily,
     });
     this.mission.startMission(mission.id);
   }
@@ -1047,6 +1058,9 @@ export class TempestCommand extends EventEmitter<CommandEvents> {
       const phaseIndex = mission.phases.indexOf(mission.currentPhase);
       if (phaseIndex === -1) return; // Guard: phase not found (race condition)
       if (phaseIndex < mission.phases.length - 1) {
+        // Record how the phase we're LEAVING actually concluded (executed vs blocked vs no eligible
+        // work) BEFORE advancing — empty phases must not be presented as normally executed.
+        this.mission.recordPhaseDisposition(mission.id);
         // Advance to next phase and generate tasks
         this.mission.advancePhase(mission.id);
         this.stallReason = null;
@@ -1584,6 +1598,29 @@ export class TempestCommand extends EventEmitter<CommandEvents> {
     state: MissionRunState;
     blockingTaskIds: string[];
     retryableTaskIds: string[];
+    /**
+     * Redaction-safe terminal snapshot of the last completed/aborted mission — retained AFTER the
+     * mission leaves the active slot so a finished run remains auditable (objective, outcome, why,
+     * what was blocked). Null while a mission is live or when none has terminated. Never resurrects
+     * the mission as active.
+     */
+    terminalMission: {
+      id: string;
+      name: string;
+      status: 'completed' | 'aborted';
+      family?: string;
+      objectiveClass: string;
+      objectiveOutcome?: string;
+      completionReason?: string;
+      finalPhase: string;
+      progress: number;
+      startedAt?: number;
+      completedAt?: number;
+      phaseDispositions: Array<{ phase: string; disposition: string; total: number; completed: number; failed: number; blocked: number; skipped: number }>;
+      taskSummary: { total: number; completed: number; failed: number; skipped: number; blocked: number; retried: number };
+      blockedPrerequisites: Array<{ id: string; name: string; reason: string }>;
+      completedPrerequisites: Array<{ id: string; name: string }>;
+    } | null;
     progress: ScanProgressEvent[];
     tasks: Array<{
       id: string;
@@ -1599,14 +1636,53 @@ export class TempestCommand extends EventEmitter<CommandEvents> {
   } {
     const activeMission = this.mission.getActiveMission();
     const taskQueue = this.mission.getTaskQueue();
-    const missionTasks = activeMission ? taskQueue.getForMission(activeMission.id) : [];
+    // After completion the mission leaves the active slot — fall back to the latest terminal
+    // mission so its tasks/outcome remain auditable instead of vanishing.
+    const displayMission = activeMission ?? this.mission.getLatestTerminalMission();
+    const missionTasks = displayMission ? taskQueue.getForMission(displayMission.id) : [];
     const failedRequired = missionTasks.filter((t) => t.status === 'failed' && t.required !== false);
-    const blockingTaskIds = failedRequired.map((t) => t.id);
-    const retryableTaskIds = missionTasks
-      .filter((t) => t.status === 'failed')
-      .map((t) => this.describeTaskRecovery(t))
-      .filter((d) => d.retryable)
-      .map((d) => d.id);
+    const blockingTaskIds = activeMission ? failedRequired.map((t) => t.id) : [];
+    const retryableTaskIds = activeMission
+      ? missionTasks
+        .filter((t) => t.status === 'failed')
+        .map((t) => this.describeTaskRecovery(t))
+        .filter((d) => d.retryable)
+        .map((d) => d.id)
+      : [];
+
+    // Build the terminal snapshot (only when nothing is live).
+    let terminalMission: ReturnType<TempestCommand['getStatus']>['terminalMission'] = null;
+    if (!activeMission && displayMission && (displayMission.status === 'completed' || displayMission.status === 'aborted')) {
+      const count = (s: string) => missionTasks.filter((t) => t.status === s).length;
+      const objectiveCompletion = deriveObjectiveCompletion(displayMission, missionTasks);
+      terminalMission = {
+        id: displayMission.id,
+        name: displayMission.name,
+        status: displayMission.status,
+        family: displayMission.missionFamily,
+        objectiveClass: displayMission.objectiveClass ?? 'general',
+        objectiveOutcome: displayMission.objectiveOutcome,
+        completionReason: displayMission.completionReason,
+        finalPhase: displayMission.currentPhase,
+        progress: displayMission.progress,
+        startedAt: displayMission.startedAt,
+        completedAt: displayMission.completedAt,
+        phaseDispositions: (displayMission.phaseDispositions ?? []).map((d) => ({
+          phase: d.phase, disposition: d.disposition, total: d.total,
+          completed: d.completed, failed: d.failed, blocked: d.blocked, skipped: d.skipped,
+        })),
+        taskSummary: {
+          total: missionTasks.length,
+          completed: count('completed'),
+          failed: count('failed'),
+          skipped: count('skipped'),
+          blocked: count('blocked'),
+          retried: missionTasks.filter((t) => (t.attempts?.length ?? 0) > 1).length,
+        },
+        blockedPrerequisites: objectiveCompletion.blockedPrerequisites,
+        completedPrerequisites: objectiveCompletion.completedPrerequisites,
+      };
+    }
 
     return {
       name: this.name,
@@ -1624,6 +1700,7 @@ export class TempestCommand extends EventEmitter<CommandEvents> {
       state: this.getRunState(),
       blockingTaskIds,
       retryableTaskIds,
+      terminalMission,
       progress: [...this.progressEvents],
       tasks: missionTasks.map(task => ({
             id: task.id,
