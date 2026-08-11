@@ -334,7 +334,7 @@ export class TempestCommand extends EventEmitter<CommandEvents> {
   private tickCount: number = 0;
   private hooks: RuntimeHooks;
   private readonly taskTimeoutMs: number;
-  private readonly objectiveClass: import('./types/index.js').MissionObjectiveClass;
+  private readonly objectiveClass?: import('./types/index.js').MissionObjectiveClass;
   private readonly objectiveDirective?: string;
   private readonly missionFamily?: import('./types/index.js').MissionFamily;
 
@@ -371,7 +371,7 @@ export class TempestCommand extends EventEmitter<CommandEvents> {
     super();
     this.name = config.name;
     this.hooks = config.hooks || {};
-    this.objectiveClass = config.objectiveClass ?? 'general';
+    this.objectiveClass = config.objectiveClass;
     this.objectiveDirective = config.objectiveDirective;
     this.missionFamily = config.missionFamily;
     this.taskTimeoutMs = TempestCommand.resolveTaskTimeoutMs(config.llm.provider);

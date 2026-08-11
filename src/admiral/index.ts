@@ -20,7 +20,7 @@
 
 import type { LLMBackbone } from '../llm/index.js';
 import type { Directive } from '../general/index.js';
-import type { OpsecLevel } from '../types/index.js';
+import type { MissionObjectiveClass, OpsecLevel } from '../types/index.js';
 
 export type MissionFamilyId =
   | 'zero_day_hunt' | 'pentest' | 'smart_contract'
@@ -34,6 +34,15 @@ export interface MissionBrief {
   family: MissionFamilyId | '';
   scope: string;
   fidelity: Fidelity;
+  /**
+   * STRUCTURAL objective intent (optional). '' (unset) means BROAD coverage — the default
+   * full T3MP3ST workflow. 'authorization_lifecycle' means the operator affirmatively asked
+   * to NARROW the mission to the authorization/access-control lifecycle lane. The mere
+   * presence of authorization vocabulary in the objective (e.g. listed among many families
+   * in a comprehensive assessment) is NOT a focus and must leave this unset — this slot is
+   * the explicit structural signal that wins over the detectObjectiveClass text heuristic.
+   */
+  objectiveClass?: MissionObjectiveClass | '';
   /**
    * Optional free-text operator guidance gathered during the planning/review cycle
    * (rate limits, forbidden actions, research emphasis, evidence requirements,
@@ -71,6 +80,7 @@ Gather exactly these slots:
 - family: infer ONE of [zero_day_hunt, pentest, smart_contract, repo_audit, ctf_range, ai_red_team]
 - scope: the rules of engagement — what is in-scope and who authorized it
 - fidelity: dry_run (plan only, NO packets — the safe default) or live (real packets — requires explicit authorization)
+- objective_class (OPTIONAL): 'authorization_lifecycle' ONLY when the operator affirmatively narrows the engagement to authorization/access-control lifecycle testing ("focus on", "exclusively", "only test authorization"...). A comprehensive/broad engagement that merely LISTS authorization among many families stays '' (broad coverage). Vocabulary is not intent; when unsure, leave ''.
 
 RULES:
 - Ask ONE focused question at a time, for the single most important missing slot. Be brief, sharp, a touch wry — an experienced operator's voice, not a perky chatbot. 1-3 sentences.
@@ -92,7 +102,8 @@ OUTPUT FORMAT — return ONLY a single JSON object, no prose or markdown fences 
     "target": "" or a string,
     "family": "" or one of [zero_day_hunt, pentest, smart_contract, repo_audit, ctf_range, ai_red_team],
     "scope": "" or a string,
-    "fidelity": "dry_run"
+    "fidelity": "dry_run",
+    "objective_class": "" or "authorization_lifecycle"
   },
   "missing": ["names of slots still needed"],
   "ready": true or false
@@ -110,12 +121,17 @@ function coerceTurn(raw: any): AdmiralTurn {
   // deliberate human action: the UI fidelity toggle + the /api/admiral/launch confirm gate
   // (409 unless confirmed). Fidelity out of converse is therefore always dry_run.
   const fidelity: Fidelity = 'dry_run';
+  // Structural objective intent from the conversation (validated — anything unrecognized is
+  // dropped so the server-side text heuristic remains the safe fallback).
+  const rawClass = b.objective_class ?? b.objectiveClass;
+  const objectiveClass = rawClass === 'authorization_lifecycle' || rawClass === 'general' ? rawClass : '';
   const brief: MissionBrief = {
     objective: typeof b.objective === 'string' ? b.objective : '',
     target: typeof b.target === 'string' ? b.target : '',
     family,
     scope: typeof b.scope === 'string' ? b.scope : '',
     fidelity,
+    objectiveClass,
   };
   // required slots: objective, target, family, scope
   const missing: string[] = [];

@@ -27087,8 +27087,15 @@ Be specific and actionable. Format as structured JSON.`;
       h = '<div style="font-size:14px;color:#cfe;margin-bottom:12px;font-weight:700;">How should the Admiral run it?</div>'
         + '<div style="font-size:11.5px;color:#8aa;margin-bottom:6px;">Depth</div><div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:16px;">'
         + DEPTHS.map(x=>'<div onclick="admiralSet(\'depth\',\''+x.id+'\')" style="'+choice(S.depth===x.id)+'"><div style="font-weight:700;color:#dde;font-size:13px;">'+x.label+'</div><div style="font-size:10px;color:#8a9;">'+x.d+'</div></div>').join('')+'</div>'
-        + '<div style="font-size:11.5px;color:#8aa;margin-bottom:6px;">Autonomy</div><div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">'
+        + '<div style="font-size:11.5px;color:#8aa;margin-bottom:6px;">Autonomy</div><div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:16px;">'
         + AUTON.map(x=>'<div onclick="admiralSet(\'autonomy\',\''+x.id+'\')" style="'+choice(S.autonomy===x.id)+'"><div style="font-weight:700;color:#dde;font-size:13px;">'+(x.id==='autonomous'?'🤖 ':'🎚 ')+x.label+'</div><div style="font-size:10px;color:#8a9;">'+x.d+'</div></div>').join('')+'</div>'
+        // Structural objective intent: the ONLY way a mission narrows to the bounded
+        // authorization-lifecycle lane. Default is broad coverage — mentioning authorization
+        // in directives/objective text alone never narrows the hunt (vocabulary is not intent).
+        + '<div style="font-size:11.5px;color:#8aa;margin-bottom:6px;">Objective focus</div><div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;">'
+        + [{id:'',label:'Broad coverage',d:'Default — full kill-chain workflow across all relevant families; evidence steers depth.'},
+           {id:'authorization_lifecycle',label:'Authorization lifecycle',d:'Narrow bounded lane — current-principal baselines; missing fixtures honestly reported BLOCKED.'}]
+          .map(x=>'<div onclick="admiralSet(\'focus\',\''+x.id+'\')" style="'+choice(S.focus===x.id)+'"><div style="font-weight:700;color:#dde;font-size:13px;">'+x.label+'</div><div style="font-size:10px;color:#8a9;">'+x.d+'</div></div>').join('')+'</div>'
         // Optional operator directives — free-text guidance folded into the planner Directive
         // (rate limits, forbidden actions, research emphasis, evidence bar, business-logic
         // hypotheses). Materially steers the plan the model produces; it does NOT tighten the
@@ -27105,6 +27112,7 @@ Be specific and actionable. Format as structured JSON.`;
         + '<div><b style="color:#8ad">Objective:</b> '+t.obj+'</div>'
         + '<div><b style="color:#8ad">Mission family:</b> <span style="color:#9cf;">'+(_FAMILY[S.type]||'zero_day_hunt')+'</span></div>'
         + '<div><b style="color:#8ad">Depth:</b> '+S.depth+'  ·  <b style="color:#8ad">Autonomy:</b> '+(S.autonomy==='autonomous'?'🤖 autonomous (end-to-end)':'guided (per-step approval)')+'</div>'
+        + '<div><b style="color:#8ad">Objective focus:</b> '+(S.focus==='authorization_lifecycle'?'<span style="color:#fc6;">authorization lifecycle (narrow bounded lane)</span>':'broad coverage (full workflow)')+'</div>'
         + (String(S.directives||'').trim() ? '<div><b style="color:#8ad">Directives:</b> <span style="color:#cbd6db;">'+esc(S.directives.trim())+'</span> <span style="color:#7f93a5;font-size:10px;">(steers the plan, not the scope gate)</span></div>' : '')
         + '<div><b style="color:#8ad">Authorization:</b> ✅ confirmed by operator</div></div>'
         + '<div style="font-size:11px;color:#7f93a5;margin-top:10px;line-height:1.45;">⚓ <b style="color:#9cf">Launch Hunt</b> hands this brief to <b>Op Admiral</b>, which plans the operation and brings up real operators against the target. Preview the plan first to see the steps with no packets sent.</div>'
@@ -27196,7 +27204,7 @@ Be specific and actionable. Format as structured JSON.`;
   };
   window.admiralProceedPick = function(){ if(!window.__admLastPick) return; syncStep2(); S.target=window.__admLastPick; render(); if(window.toast) toast('⚓ Target set: '+window.__admLastPick,'success'); };
   window.openAdmiralWizard = function(){
-    S = { step:1, type:null, target:(document.getElementById('heroHuntTarget')||{}).value||'', authorized:false, depth:'standard', autonomy:(document.getElementById('heroAutonomousMode')||{}).checked?'autonomous':'guided', headers:'', directives:'' };
+    S = { step:1, type:null, target:(document.getElementById('heroHuntTarget')||{}).value||'', authorized:false, depth:'standard', autonomy:(document.getElementById('heroAutonomousMode')||{}).checked?'autonomous':'guided', headers:'', directives:'', focus:'' };
     window.__admExclude = []; window.__admLastPick = null;
     let o = document.getElementById('admiralWizard');
     if (!o){
@@ -27241,6 +27249,10 @@ Be specific and actionable. Format as structured JSON.`;
       + (sourceOnly ? 'SOURCE-ONLY static analysis + coordinated disclosure on ' : 'In-scope target: ') + S.target + '. '
       + 'Depth=' + S.depth + '; autonomy=' + S.autonomy + '.';
     const brief = { objective: t.obj, target: S.target, family: _FAMILY[S.type] || 'zero_day_hunt', scope: scope, fidelity: fidelity };
+    // Structural objective intent (explicit operator choice in step 3) rides on the brief and
+    // WINS over the server-side text heuristic — this is how a hunt affirmatively narrows to
+    // the authorization-lifecycle lane; absence always means broad coverage.
+    if (S.focus) brief.objectiveClass = S.focus;
     // Optional operator directives ride on the brief; briefToDirective() folds them into the
     // planner Directive.constraints so they materially steer the plan (not a cosmetic field).
     const directives = String(S.directives||'').trim();

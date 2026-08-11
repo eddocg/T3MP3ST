@@ -24,14 +24,54 @@ import { KILL_CHAIN_ORDER } from '../operators/index.js';
 /**
  * Detect the operator's research objective class from the objective + directive text.
  * ORTHOGONAL to the routed MissionFamily (a `web_api` mission can carry an
- * `authorization_lifecycle` objective). Pure keyword heuristic — no Danalock/target-specific terms.
+ * `authorization_lifecycle` objective). No Danalock/target-specific terms.
+ *
+ * DOMINANT-INTENT MODEL (not keyword counting). A specialized objective requires
+ * AFFIRMATIVE specialized intent; the mere presence of authorization vocabulary is a
+ * listing, not a focus. Intent signals, in precedence order:
+ *   1. BROAD intent (explicit breadth: "comprehensive", "not limited to", "and other
+ *      relevant classes", ...) is DECISIVE for `general` — the operator asked for wide
+ *      coverage, so a mentioned family is one concern of many.
+ *   2. OTHER-family vocabulary alongside authz vocabulary — authorization was LISTED as
+ *      one of several families -> `general` ("focus on X, then also test injection" is
+ *      mixed intent, and broad is the safe reading).
+ *   3. FOCUS intent ("focus on", "exclusively", "concentrate on", "avoid unrelated", ...)
+ *      is affirmative narrow intent -> `authorization_lifecycle`.
+ *   4. EXCLUSIVITY — authorization is the ONLY security-family vocabulary present — is
+ *      weak-affirmative: the operator chose to talk about nothing else, so the lane is
+ *      the mission.
+ * Ambiguity biases to `general`: misclassifying broad-as-narrow silently skips coverage
+ * (the regression this fixes); misclassifying narrow-as-broad only runs extra coverage.
+ * An explicit structural override (Guided Hunt brief / launch body `objectiveClass`) is
+ * always preferred over this text heuristic — see parseObjectiveClassOverride.
  */
+// Authorization-lane vocabulary (the specialized objective family).
+const AUTHZ_LANE_VOCAB = /\b(authorization|authorisation|access control|bola|bfla|idor|privilege escalation|role (escalation|boundary)|permission boundar|ownership|cross-(user|tenant|principal)|revocation|downgrade|stale access|session revocation|object.?level|function.?level)\b/i;
+// Distinct OTHER vulnerability families — authz mentioned alongside these is a listing.
+// NOTE: bare "session" is deliberately absent ("session revocation" is authz-lane); the
+// generic "vulnerabilities" is absent (it appears in every mission's default objectives).
+const OTHER_FAMILY_VOCAB = /\b(inject\w*|sqli|xss|cross-site scripting|ssrf|csrf|xxe|\brce\b|remote code execution|deserializ\w*|path traversal|file inclusion|file upload|open redirect|clickjack\w*|cors|misconfig\w*|tls|ssl|subdomain( takeover)?|port scan|dns\b|directory (brute|discovery|listing)|content discovery|fuzz\w*|brute.?force|credential stuffing|session (fixation|hijack)|jwt\b|supply chain|dependenc\w+|secret (scan|exposure|leak)|rate limit|template injection|prototype pollution|buffer overflow|malware|phishing|osint|cryptograph\w*|weak cipher|security header|waf)\b/i;
+// Explicit breadth intent — decisive for 'general' even when specialized vocabulary appears.
+const BROAD_INTENT = /\b(comprehensive|broad|full[- ]?(spectrum|coverage)|wide[- ]ranging|not limited|(?:not?|never|do not|don't) (?:be )?restrict\w*|unrestrict\w*|and other|other (relevant|classes|families|vectors|areas)|any (?:relevant )?(vector|class|family|area)|etc\b\.?|everything|let (?:the )?evidence (?:determine|decide|guide|drive)|wherever (?:the )?evidence|whatever (?:the )?evidence|all (?:vulnerability|vuln) (?:classes|families)|each (?:class|family)|research[- ]prioriti\w+|discovery[- ](?:first|driven))\b/i;
+// Affirmative narrow-focus intent — the operator explicitly scopes the mission down.
+const FOCUS_INTENT = /\b(focus(?:ed|es|ing)? (?:on|exclusively|specifically|primarily)|exclusively|specifically|primarily|concentrat\w+ on|prioriti[sz]e|narrow(?:ly|ed)? (?:to|on)|deep[- ]dive|limited to|restrict(?:ed)? to|avoid (?:unrelated|generic|other)|instead of (?:generic|broad)|rather than (?:generic|broad)|do not (?:run|perform|do) (?:generic|unrelated))\b/i;
+
 export function detectObjectiveClass(text: string): MissionObjectiveClass {
-  const t = String(text || '').toLowerCase();
-  if (/\b(authorization|authorisation|access control|bola|bfla|idor|privilege escalation|role (escalation|boundary)|permission boundar|ownership|cross-(user|tenant|principal)|revocation|downgrade|stale access|session revocation|object.?level|function.?level)\b/.test(t)) {
-    return 'authorization_lifecycle';
-  }
-  return 'general';
+  const t = String(text || '');
+  if (!AUTHZ_LANE_VOCAB.test(t)) return 'general';
+  if (BROAD_INTENT.test(t)) return 'general';
+  if (OTHER_FAMILY_VOCAB.test(t)) return 'general';
+  if (FOCUS_INTENT.test(t)) return 'authorization_lifecycle';
+  return 'authorization_lifecycle';
+}
+
+/**
+ * Validate an explicit STRUCTURAL objective-class override (Guided Hunt brief slot or
+ * launch-body field). Structural operator intent always wins over the text heuristic;
+ * anything unrecognized is ignored (returns undefined) so detection falls back safely.
+ */
+export function parseObjectiveClassOverride(value: unknown): MissionObjectiveClass | undefined {
+  return value === 'authorization_lifecycle' || value === 'general' ? value : undefined;
 }
 
 // =============================================================================

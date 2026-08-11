@@ -441,7 +441,17 @@ function recordTerminalMissionSnapshot(mission: Mission, status: 'completed' | '
     },
     blockedPrerequisites: completion.blockedPrerequisites.map((p) => ({ ...p, name: redactLedgerText(p.name, 240), reason: redactLedgerText(p.reason, 500) })),
     completedPrerequisites: completion.completedPrerequisites.map((p) => ({ ...p, name: redactLedgerText(p.name, 240) })),
-    authContext: { present: auth.present, origin: auth.origin, headerNames: auth.headerNames },
+    authContext: {
+      present: auth.present,
+      origin: auth.origin,
+      headerNames: auth.headerNames,
+      // headerNames.length — the count of bound credential header NAMES (never values).
+      headerCount: auth.headerNames.length,
+      // Independently controlled principal contexts bound for the mission. The current
+      // single-binding runtime can express at most 1; first-class named multi-principal
+      // profiles are a dedicated follow-up epic (not yet an available capability).
+      principalCount: auth.present ? 1 : 0,
+    },
     recordedAt: nowIso(),
   };
   terminalMissionLedger.set(snapshot.id, snapshot);
@@ -1009,7 +1019,13 @@ interface TerminalMissionSnapshot {
   taskSummary: { total: number; completed: number; failed: number; skipped: number; blocked: number; retried: number };
   blockedPrerequisites: Array<{ id: string; name: string; reason: string }>;
   completedPrerequisites: Array<{ id: string; name: string }>;
-  authContext: { present: boolean; origin: string | null; headerNames: string[] };
+  /**
+   * Redaction-safe authentication metadata. `headerCount` counts bound credential header
+   * NAMES (values never leave the arsenal layer) — it is NOT a principal count.
+   * `principalCount` counts independently controlled principal contexts (0 or 1 in the
+   * current single-binding runtime; N requires the multi-principal epic).
+   */
+  authContext: { present: boolean; origin: string | null; headerNames: string[]; headerCount: number; principalCount: number };
   recordedAt: string;
 }
 const terminalMissionLedger = new Map<string, TerminalMissionSnapshot>();
@@ -2148,7 +2164,15 @@ function liveObjectiveBlock(mission: Mission, cmd: TempestCommand): Record<strin
     })),
     // Redaction-safe auth-context metadata: whether a credential context is bound and the header
     // NAMES only — never values. Lets a reviewer answer "were credentials configured?" honestly.
-    authContext: { present: auth.present, origin: auth.origin, headerNames: auth.headerNames, count: auth.headerNames.length },
+    // headerCount counts header NAMES; principalCount counts independent controlled principals
+    // (0|1 in the current single-binding runtime — N requires the multi-principal epic).
+    authContext: {
+      present: auth.present,
+      origin: auth.origin,
+      headerNames: auth.headerNames,
+      headerCount: auth.headerNames.length,
+      principalCount: auth.present ? 1 : 0,
+    },
   };
 }
 
@@ -2162,7 +2186,13 @@ function snapshotObjectiveBlock(snap: TerminalMissionSnapshot): Record<string, u
     blockedPrerequisites: snap.blockedPrerequisites,
     completedPrerequisites: snap.completedPrerequisites,
     phaseDispositions: snap.phaseDispositions,
-    authContext: { ...snap.authContext, count: snap.authContext.headerNames.length },
+    // Persisted snapshots carry headerCount/principalCount; tolerate legacy snapshots that
+    // predate the explicit-count schema by deriving them from the header-name list.
+    authContext: {
+      ...snap.authContext,
+      headerCount: snap.authContext.headerCount ?? snap.authContext.headerNames.length,
+      principalCount: snap.authContext.principalCount ?? (snap.authContext.present ? 1 : 0),
+    },
   };
 }
 
@@ -7747,13 +7777,15 @@ app.post('/api/general/execute', async (req: Request, res: Response): Promise<vo
       broadcastEvent('general:target_headers', { origin: hostFromTarget(headerTarget), headerNames: execHeaderNames });
     }
 
-    // Create TempestCommand instance from the plan
+    // Create TempestCommand instance from the plan. An explicit objectiveClass body field is
+    // structural operator intent and wins over text detection (absent => heuristic on objectives).
     const cmd = createTempestCommandInstance(
       execConfig.missionName,
       generalConfig.apiKey,
       generalConfig.provider,
       generalConfig.model,
-      generalConfig.baseUrl
+      generalConfig.baseUrl,
+      { objectiveClass: parseObjectiveClassOverride((req.body as Record<string, unknown>).objectiveClass) }
     );
 
     // Add targets from the plan
@@ -7896,12 +7928,15 @@ app.post('/api/general/auto', async (req: Request, res: Response): Promise<void>
       if (!guard.allowed) { blockForApproval(res, guard); return; }
     }
 
+    // An explicit objectiveClass body field is structural operator intent and wins over the
+    // text heuristic applied to `objective` (absent => dominant-intent detection).
     const cmd = createTempestCommandInstance(
       execConfig.missionName,
       generalConfig.apiKey,
       generalConfig.provider,
       generalConfig.model,
-      generalConfig.baseUrl
+      generalConfig.baseUrl,
+      { objectiveClass: parseObjectiveClassOverride((req.body as Record<string, unknown>).objectiveClass) }
     );
 
     for (const target of execConfig.targets) {
@@ -8086,7 +8121,7 @@ app.post('/api/attack-graph/ingest', (req: Request, res: Response): void => {
 // =============================================================================
 
 import { Admiral, briefToDirective, type ChatMsg, type MissionBrief } from './admiral/index.js';
-import { detectObjectiveClass, deriveObjectiveCompletion } from './mission/index.js';
+import { detectObjectiveClass, deriveObjectiveCompletion, parseObjectiveClassOverride } from './mission/index.js';
 
 /**
  * POST /api/admiral/converse — one conversational turn with the Admiral.
@@ -8170,6 +8205,14 @@ app.post('/api/admiral/launch', async (req: Request, res: Response): Promise<voi
     const directive = briefToDirective(brief);
     const live = brief.fidelity === 'live';
 
+    // Resolve the objective class BEFORE any response so dry-run and live report the SAME
+    // effective classification. Precedence: explicit structural intent (launch body, then the
+    // Admiral brief slot) wins over the dominant-intent text heuristic — an operator who
+    // affirmatively states focus (or breadth) is authoritative; vocabulary alone is not intent.
+    const objectiveClass = parseObjectiveClassOverride((req.body as Record<string, unknown>).objectiveClass)
+      ?? parseObjectiveClassOverride(brief.objectiveClass)
+      ?? detectObjectiveClass(`${directive.objective} ${directive.constraints ?? ''}`);
+
     // Optional per-mission authenticated-target headers. Validate BEFORE any planning/launch so a
     // malformed map is rejected up front (fail closed) and never reaches a mission. On success we
     // learn only the header NAMES (secret values stay in the arsenal layer) and feed those names to
@@ -8224,7 +8267,7 @@ app.post('/api/admiral/launch', async (req: Request, res: Response): Promise<voi
       // DRY-RUN: plan only, no mission, no packets, no claimed findings. Don't arm headers for a
       // preview; report only the safe header NAMES so the operator can confirm what will be sent.
       clearRuntimeTargetHeaders();
-      res.json({ mode: 'dry_run', plan, directive, authenticatedHeaderNames: headerNames, note: 'Plan only — no packets sent, no findings claimed.' });
+      res.json({ mode: 'dry_run', plan, directive, objectiveClass, authenticatedHeaderNames: headerNames, note: 'Plan only — no packets sent, no findings claimed.' });
       return;
     }
 
@@ -8260,14 +8303,14 @@ app.post('/api/admiral/launch', async (req: Request, res: Response): Promise<voi
       // Objective fidelity: derive the research objective class from the operator's directive so the
       // mission seeds the objective lane (bounded recon + current-principal baselines + explicit
       // blocked prerequisites) instead of the generic recon battery. Orthogonal to MissionFamily.
-      objectiveClass: detectObjectiveClass(`${directive.objective} ${directive.constraints ?? ''}`),
+      objectiveClass,
       objectiveDirective: directive.objective,
       // The routed family (from the plan) is stored on the mission so durable ledger records land
       // in the correct lane — informational only, never steers seeding.
       missionFamily: (plan as { missionFamily?: string }).missionFamily as import('./types/index.js').MissionFamily | undefined,
     });
     res.json({
-      mode: 'live', plan, review: execConfig.review,
+      mode: 'live', plan, review: execConfig.review, objectiveClass,
       operators: broughtUp.spawnedOps, status: broughtUp.status, sse: '/api/events',
       authenticatedHeaderNames: headerNames,
       note: broughtUp.spawnedOps.length
