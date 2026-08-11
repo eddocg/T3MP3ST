@@ -19,6 +19,7 @@
 
 import type { Severity, ToolFinding } from '../types/index.js';
 import { redactString } from '../redact.js';
+import { deriveCategory } from '../evidence/classification.js';
 
 // ── small, defensive helpers ────────────────────────────────────────────────
 const SEVERITIES = new Set<Severity>(['critical', 'high', 'medium', 'low', 'info']);
@@ -78,17 +79,29 @@ function parseNuclei(raw: string): ToolFinding[] {
     const cls = asObj(info.classification);
     const templateId = String(e['template-id'] ?? e.templateID ?? '');
     const title = String(info.name || templateId || 'nuclei match');
+    const tags = asStrArray(info.tags);
     const bits = [
       e.host && `host: ${String(e.host)}`,
       e['matched-at'] && `matched-at: ${String(e['matched-at'])}`,
       info.description && `desc: ${truncate(String(info.description))}`,
     ].filter(Boolean) as string[];
+    const cve = asStrArray(cls['cve-id']);
+    const cwe = asStrArray(cls['cwe-id']);
+    // CANONICAL CATEGORY: the dedup fingerprint keys on category+origin+route. Without one,
+    // scanner detections fall back to title slugs and every reworded template mints a new row
+    // for the SAME condition. Derive from the full signal set (title + template id + tags +
+    // cwe) so e.g. "HTTP Missing Security Headers" and "missing-security-headers" templates
+    // consolidate into one candidate. Template/template-id vocabulary is slug-style
+    // ("weak-cipher-suites") — fold it into the text the category rules see.
+    const category = deriveCategory({
+      title: `${title} ${templateId.replace(/[-_]/g, ' ')} ${tags.join(' ')}`,
+      cwe,
+    });
     const f: ToolFinding = { title, severity: sev(info.severity), details: bits.join(' | ') || title };
+    if (category !== 'general') f.category = category;
     const cvss = num(cls['cvss-score']);
     if (cvss !== undefined) f.cvss = cvss;
-    const cve = asStrArray(cls['cve-id']);
     if (cve.length) f.cve = cve;
-    const cwe = asStrArray(cls['cwe-id']);
     if (cwe.length) f.cwe = cwe;
     if (info.remediation) f.remediation = String(info.remediation);
     out.push(f);
