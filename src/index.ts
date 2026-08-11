@@ -1177,9 +1177,17 @@ export class TempestCommand extends EventEmitter<CommandEvents> {
           return;
         }
         this.clearDispatch(task.id);
-        if (result.success === false) {
-          taskQueue.fail(task.id, result.error || result.output || 'task returned unsuccessful result');
-          taskQueue.recordAttempt(task.id, 'failed', result.error || result.output);
+        // STRUCTURED DISPOSITION wins over the bare success flag: a task that declared
+        // "blocked" (planned work could not execute) or "failed" must not be recorded as
+        // completed coverage merely because the agent loop returned normally.
+        const disposition = result.disposition ?? (result.success === false ? 'failed' : 'completed');
+        if (disposition === 'blocked') {
+          const reason = result.dispositionReason || result.output || 'operator reported the planned work could not execute';
+          taskQueue.block(task.id, reason);
+          taskQueue.recordAttempt(task.id, 'blocked', reason);
+        } else if (disposition === 'failed' || result.success === false) {
+          taskQueue.fail(task.id, result.dispositionReason || result.error || result.output || 'task returned unsuccessful result');
+          taskQueue.recordAttempt(task.id, 'failed', result.dispositionReason || result.error || result.output);
         } else {
           taskQueue.complete(task.id, result);
           taskQueue.recordAttempt(task.id, 'completed');
@@ -1522,7 +1530,15 @@ export class TempestCommand extends EventEmitter<CommandEvents> {
    * so all events stream to the web UI in real-time.
    */
   public connectBroadcast(broadcast: (event: string, data: Record<string, unknown>) => void): void {
-    this.on('finding:discovered', (data) => broadcast('finding', data));
+    this.on('finding:discovered', (data) => {
+      // Resolve the internal target UUID to the human target origin/address — the UI must never
+      // render a bare internal id as a finding's target. Additive; targetId is preserved.
+      const finding = (data as { finding?: Finding }).finding;
+      const targetAddress = finding
+        ? this.targetEnv.getAllTargets().find((t) => t.id === finding.targetId)?.address ?? finding.targetId
+        : undefined;
+      broadcast('finding', { ...data, finding: finding ? { ...finding, targetAddress } : finding });
+    });
     this.on('operator:spawned', (data) => broadcast('operator:spawned', data));
     this.on('operator:burned', (data) => broadcast('operator:burned', data));
     this.on('credential:harvested', (data) => broadcast('credential', data));

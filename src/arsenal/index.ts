@@ -30,6 +30,7 @@ import type {
 import { ToolError, ToolErrorCategory } from '../types/index.js';
 import { validateToolArgs, buildJsonSchema, assertSchemaDepth } from '../validation/index.js';
 import { registerRuntimeSecrets, clearRuntimeSecrets } from '../redact.js';
+import { parseToolOutput } from './parsers.js';
 
 const dnsResolve = promisify(dns.resolve);
 const dnsResolve4 = promisify(dns.resolve4);
@@ -211,9 +212,23 @@ function parseTargetHeaderConfig(): TargetHeaderConfig | null {
   return buildTargetHeaderConfig(process.env.TEMPEST_TARGET_ORIGIN, process.env.TEMPEST_TARGET_HEADERS);
 }
 
-function targetHeadersForUrl(url: string | URL, explicit?: RequestInit['headers']): Headers | undefined {
+/**
+ * Auth-context selection for request-capable tools. NON-SECRET control:
+ *  - 'inherit' (default): attach the exact-origin mission credential context (current behavior).
+ *  - 'none': deliberately suppress configured credentials for this request — enables
+ *    authenticated-vs-unauthenticated CURRENT-PRINCIPAL baselines. This is not multi-principal
+ *    support and never carries credential values (the word itself is the whole payload).
+ */
+export type AuthMode = 'inherit' | 'none';
+
+/** Coerce a tool parameter to an AuthMode — fail-safe: only the exact string 'none' suppresses. */
+export function resolveAuthMode(value: unknown): AuthMode {
+  return value === 'none' ? 'none' : 'inherit';
+}
+
+function targetHeadersForUrl(url: string | URL, explicit?: RequestInit['headers'], authMode: AuthMode = 'inherit'): Headers | undefined {
   const merged = new Headers();
-  const config = parseTargetHeaderConfig();
+  const config = authMode === 'none' ? null : parseTargetHeaderConfig();
   try {
     if (config && new URL(url).origin === config.origin) {
       config.headers.forEach((value, name) => merged.set(name, value));
@@ -231,7 +246,8 @@ function targetHeadersForUrl(url: string | URL, explicit?: RequestInit['headers'
  * produced a finding ran with credential headers applied). Means "credentials were attached", NOT
  * that authentication or authorization succeeded. Never exposes header names or values.
  */
-export function credentialHeadersAppliedFor(url: string | URL): boolean {
+export function credentialHeadersAppliedFor(url: string | URL, authMode: AuthMode = 'inherit'): boolean {
+  if (authMode === 'none') return false; // deliberately suppressed — provenance must say so
   try {
     const config = parseTargetHeaderConfig();
     return !!config && new URL(url).origin === config.origin && [...config.headers.keys()].length > 0;
@@ -283,8 +299,8 @@ const REDIRECT_STATUS = new Set([301, 302, 303, 307, 308]);
 const CROSS_ORIGIN_CREDENTIAL_HEADERS = ['authorization', 'cookie', 'cookie2', 'proxy-authorization'];
 
 /** Apply exact-origin headers to every built-in fetch without leaking them across redirects. */
-async function targetFetch(url: string | URL, init: RequestInit = {}): Promise<Response> {
-  const config = parseTargetHeaderConfig();
+async function targetFetch(url: string | URL, init: RequestInit = {}, authMode: AuthMode = 'inherit'): Promise<Response> {
+  const config = authMode === 'none' ? null : parseTargetHeaderConfig();
   let currentUrl = new URL(url);
   if (!config || currentUrl.origin !== config.origin) return globalThis.fetch(url, init);
 
@@ -293,7 +309,7 @@ async function targetFetch(url: string | URL, init: RequestInit = {}): Promise<R
   let body = init.body;
 
   for (let redirects = 0; redirects <= 20; redirects++) {
-    const headers = targetHeadersForUrl(currentUrl, explicitHeaders);
+    const headers = targetHeadersForUrl(currentUrl, explicitHeaders, authMode);
     const response = await globalThis.fetch(currentUrl, { ...init, method, body, headers, redirect: 'manual' });
     const location = response.headers.get('location');
     if (!REDIRECT_STATUS.has(response.status) || !location) return response;
@@ -792,8 +808,58 @@ export const BUILTIN_TOOLS: CustomTool[] = [
       }
 
       const portsStr = context.parameters.ports as string || '22,80,443,8080';
-      const ports = portsStr.split(',').map(p => parseInt(p.trim(), 10)).filter(p => !isNaN(p));
       const timeout = (context.parameters.timeout as number) || 2000;
+
+      // Range-aware port parsing: "22,80,443", "8000-8100", "1-65535" are all valid specs.
+      // The old parser split on ',' and parseInt'd each token — "1-65535" silently became
+      // port 1. Invalid tokens now fail loudly instead of scanning the wrong port.
+      const parsePortSpec = (spec: string): { ports: number[]; error?: string; fullRange: boolean } => {
+        const ports = new Set<number>();
+        let fullRange = false;
+        for (const rawTok of spec.split(',')) {
+          const tok = rawTok.trim();
+          if (!tok) continue;
+          const rangeMatch = tok.match(/^(\d{1,5})\s*-\s*(\d{1,5})$/);
+          if (rangeMatch) {
+            const lo = parseInt(rangeMatch[1], 10);
+            const hi = parseInt(rangeMatch[2], 10);
+            if (lo < 1 || hi > 65535 || lo > hi) {
+              return { ports: [], error: `invalid port range '${tok}' (must be 1-65535, low <= high)`, fullRange: false };
+            }
+            if (hi - lo + 1 > 1000) fullRange = true; // spanning more than the bounded window
+            for (let p = lo; p <= hi; p++) ports.add(p);
+            continue;
+          }
+          if (!/^\d{1,5}$/.test(tok)) {
+            return { ports: [], error: `invalid port spec '${tok}' (use "22,80,443" or "8000-8100")`, fullRange: false };
+          }
+          const p = parseInt(tok, 10);
+          if (p < 1 || p > 65535) {
+            return { ports: [], error: `invalid port '${tok}' (must be 1-65535)`, fullRange: false };
+          }
+          ports.add(p);
+        }
+        return { ports: [...ports].sort((a, b) => a - b), fullRange };
+      };
+
+      const parsed = parsePortSpec(portsStr);
+      if (parsed.error || parsed.ports.length === 0) {
+        return { success: false, error: `port_scan: ${parsed.error ?? 'no valid ports to scan'}` };
+      }
+
+      // POLICY FIDELITY — same seam as nmap_scan: wide-range sweeps are a pacing/ROE decision.
+      // Default autonomous posture is bounded (1000-port window); a mission carrying explicit
+      // full-range authorization (runtime scan policy) runs the requested sweep unbounded.
+      const AUTONOMOUS_PORT_WINDOW = 1000;
+      const scanPolicy = runtimeScanPolicy();
+      let ports = parsed.ports;
+      let policyNote = '';
+      if (ports.length > AUTONOMOUS_PORT_WINDOW && !scanPolicy.fullRangeAuthorized) {
+        ports = ports.slice(0, AUTONOMOUS_PORT_WINDOW);
+        policyNote = `\n\n[policy] Requested ${parsed.ports.length} ports — clamped to the first ${AUTONOMOUS_PORT_WINDOW} (default autonomous bound). Full-range sweeps stay available through the normal planning/ROE seam: state the full-range intent explicitly in the mission objective/operator directives, or launch with allowFullRangeScans.`;
+      } else if (parsed.fullRange && scanPolicy.fullRangeAuthorized) {
+        policyNote = `\n\n[policy] Wide-range (${parsed.ports.length}-port) sweep authorized by ${scanPolicy.authorizedBy ?? 'mission pacing/ROE policy'} — running unbounded.`;
+      }
 
       const portServices: Record<number, string> = {
         21: 'ftp', 22: 'ssh', 23: 'telnet', 25: 'smtp', 53: 'dns',
@@ -828,7 +894,7 @@ export const BUILTIN_TOOLS: CustomTool[] = [
 
       return {
         success: true,
-        output: `Port scan of ${target} (${ports.length} ports scanned):\n${results.join('\n')}\n\nOpen ports: ${openPorts.length}`,
+        output: `Port scan of ${target} (${ports.length} ports scanned):\n${results.join('\n')}\n\nOpen ports: ${openPorts.length}${policyNote}`,
         findings: openPorts.length > 0 ? [{
           title: 'Open Ports Detected',
           severity: 'info',
@@ -1014,12 +1080,14 @@ export const BUILTIN_TOOLS: CustomTool[] = [
       { name: 'method', type: 'string', description: 'HTTP method', required: false, default: 'GET' },
       { name: 'headers', type: 'object', description: 'Request headers', required: false },
       { name: 'body', type: 'string', description: 'Request body', required: false },
+      { name: 'authMode', type: 'string', description: 'Credential context: "inherit" (default) or "none" (deliberately unauthenticated — for auth-vs-unauth baselines)', required: false },
     ],
     handler: async (context) => {
       const url = context.parameters.url as string;
       const method = (context.parameters.method as string) || 'GET';
       const headers = context.parameters.headers as Record<string, string> | undefined;
       const body = context.parameters.body as string | undefined;
+      const authMode = resolveAuthMode(context.parameters.authMode);
 
       try {
         const response = await targetFetch(url, {
@@ -1027,7 +1095,7 @@ export const BUILTIN_TOOLS: CustomTool[] = [
           headers,
           body: body && method !== 'GET' ? body : undefined,
           signal: AbortSignal.timeout(10000),
-        });
+        }, authMode);
 
         const responseHeaders = Object.fromEntries(response.headers.entries());
         return {
@@ -2448,10 +2516,12 @@ ${issues.length ? `Issues:\n${issues.join('\n')}` : '✓ No obvious issues'}`,
     parameters: [
       { name: 'url', type: 'string', description: 'Base URL of the target', required: true },
       { name: 'wordlist', type: 'string', description: 'Probe set: common, graphql, rest', required: false, default: 'common' },
+      { name: 'authMode', type: 'string', description: 'Credential context: "inherit" (default) or "none" (deliberately unauthenticated)', required: false },
     ],
     handler: async (context) => {
       const baseUrl = (context.parameters.url as string).replace(/\/+$/, '');
       const wordlistType = context.parameters.wordlist as string || 'common';
+      const authMode = resolveAuthMode(context.parameters.authMode);
 
       const wordlists: Record<string, string[]> = {
         common: [
@@ -2503,7 +2573,7 @@ ${issues.length ? `Issues:\n${issues.join('\n')}` : '✓ No obvious issues'}`,
                 method: 'GET',
                 signal: AbortSignal.timeout(5000),
                 redirect: 'manual',
-              });
+              }, authMode);
               const contentType = resp.headers.get('content-type') || '';
               const bodyText = await resp.text();
               return {
@@ -2555,7 +2625,7 @@ ${issues.length ? `Issues:\n${issues.join('\n')}` : '✓ No obvious issues'}`,
             details: `Found ${apiEndpoints.length} API endpoints: ${apiEndpoints.map(e => e.path).join(', ')}`,
             category: 'info_disclosure',
             observationClass: 'observation' as const,
-            authContextApplied: credentialHeadersAppliedFor(baseUrl),
+            authContextApplied: credentialHeadersAppliedFor(baseUrl, authMode),
           }] : []),
           ...(docEndpoints.length > 0 ? [{
             title: 'API Documentation Exposed',
@@ -2563,7 +2633,7 @@ ${issues.length ? `Issues:\n${issues.join('\n')}` : '✓ No obvious issues'}`,
             details: `API documentation accessible at: ${docEndpoints.map(e => e.path).join(', ')}`,
             category: 'info_disclosure',
             observationClass: 'observation' as const,
-            authContextApplied: credentialHeadersAppliedFor(baseUrl),
+            authContextApplied: credentialHeadersAppliedFor(baseUrl, authMode),
           }] : []),
         ] : undefined,
       };
@@ -2575,9 +2645,11 @@ ${issues.length ? `Issues:\n${issues.join('\n')}` : '✓ No obvious issues'}`,
     category: 'web',
     parameters: [
       { name: 'url', type: 'string', description: 'URL to test', required: true },
+      { name: 'authMode', type: 'string', description: 'Credential context: "inherit" (default) or "none" (deliberately unauthenticated)', required: false },
     ],
     handler: async (context) => {
       const url = context.parameters.url as string;
+      const authMode = resolveAuthMode(context.parameters.authMode);
       const methods = ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS', 'HEAD', 'TRACE', 'CONNECT'];
       const results: { method: string; status: number; allowed: boolean }[] = [];
       const dangerousMethods: string[] = [];
@@ -2588,7 +2660,7 @@ ${issues.length ? `Issues:\n${issues.join('\n')}` : '✓ No obvious issues'}`,
         const optResp = await targetFetch(url, {
           method: 'OPTIONS',
           signal: AbortSignal.timeout(5000),
-        });
+        }, authMode);
         optionsAllow = optResp.headers.get('allow');
         const accessControlMethods = optResp.headers.get('access-control-allow-methods');
         if (accessControlMethods) {
@@ -2611,7 +2683,7 @@ ${issues.length ? `Issues:\n${issues.join('\n')}` : '✓ No obvious issues'}`,
             method,
             signal: AbortSignal.timeout(5000),
             redirect: 'manual',
-          });
+          }, authMode);
 
           const status = response.status;
           // Consider a method "allowed" if it doesn't return 405 Method Not Allowed
@@ -2648,7 +2720,7 @@ ${issues.length ? `Issues:\n${issues.join('\n')}` : '✓ No obvious issues'}`,
           details: `The following potentially dangerous HTTP methods are enabled: ${dangerousMethods.join(', ')}. This is a hardening OBSERVATION — no unauthorized execution was demonstrated. TRACE can enable XST, PUT/DELETE may allow modification, only IF an authorization boundary actually fails (not tested here).`,
           category: 'info_disclosure',
           observationClass: 'observation' as const,
-          authContextApplied: credentialHeadersAppliedFor(url),
+          authContextApplied: credentialHeadersAppliedFor(url, authMode),
         }] : undefined,
       };
     },
@@ -2663,9 +2735,11 @@ ${issues.length ? `Issues:\n${issues.join('\n')}` : '✓ No obvious issues'}`,
     category: 'vuln',
     parameters: [
       { name: 'url', type: 'string', description: 'URL to test', required: true },
+      { name: 'authMode', type: 'string', description: 'Credential context: "inherit" (default) or "none" (deliberately unauthenticated)', required: false },
     ],
     handler: async (context) => {
       const url = context.parameters.url as string;
+      const authMode = resolveAuthMode(context.parameters.authMode);
 
       // Parse the target origin for comparison
       let targetOrigin: URL;
@@ -2693,7 +2767,7 @@ ${issues.length ? `Issues:\n${issues.join('\n')}` : '✓ No obvious issues'}`,
             method: 'GET',
             headers: { 'Origin': test.origin },
             signal: AbortSignal.timeout(5000),
-          });
+          }, authMode);
 
           const acao = response.headers.get('access-control-allow-origin');
           const acac = response.headers.get('access-control-allow-credentials');
@@ -2745,13 +2819,14 @@ ${issues.length ? `Issues:\n${issues.join('\n')}` : '✓ No obvious issues'}`,
           title: 'CORS Misconfiguration',
           // CORS reflection is a CONFIGURATION OBSERVATION until authenticated sensitive
           // cross-origin impact is demonstrated. Header reflection alone is not a demonstrated
-          // credential/data-theft capability, so severity stays bounded (low/medium) and the
-          // category stays 'cors' — the evidence-vs-claim gate keeps it from inflating further.
+          // credential/data-theft capability — even the "WITH credentials" case is a configuration
+          // observation, so the ASSERTED severity stays bounded (low/medium, preserved separately)
+          // and the evidence-vs-claim gate caps the AUDITED severity at low.
           severity: vulnerabilities.some(v => v.includes('WITH credentials') || v.includes('Wildcard ACAO with credentials')) ? 'medium' as const : 'low' as const,
           details: vulnerabilities.join('; '),
           category: 'cors',
           observationClass: 'observation',
-          authContextApplied: credentialHeadersAppliedFor(url),
+          authContextApplied: credentialHeadersAppliedFor(url, authMode),
         }] : undefined,
       };
     },
@@ -3578,20 +3653,10 @@ export const EXTERNAL_TOOLS: CustomTool[] = [
 
       const result = await runSubprocess('nuclei', args, { timeout: 300000 });
 
-      // Parse JSON lines output
-      const findings: Array<{ title: string; severity: 'info' | 'low' | 'medium' | 'high' | 'critical'; details: string }> = [];
-      for (const line of result.stdout.split('\n').filter(l => l.trim())) {
-        try {
-          const entry = JSON.parse(line);
-          findings.push({
-            title: entry.info?.name || entry['template-id'] || 'Unknown',
-            severity: entry.info?.severity || 'info',
-            details: `${entry.info?.name || 'Finding'} at ${entry.host || target}: ${entry.info?.description || entry.matched || ''}`,
-          });
-        } catch {
-          // Skip non-JSON lines
-        }
-      }
+      // Shared JSONL parser (src/arsenal/parsers.ts) — one nuclei parsing path, with canonical
+      // category derivation so repeated template detections consolidate by category+origin+route
+      // instead of minting a new row per reworded template name.
+      const findings = parseToolOutput('nuclei', result.stdout);
 
       const authNote = unappliedAuthNote(target);
       return {
@@ -3653,6 +3718,7 @@ export const EXTERNAL_TOOLS: CustomTool[] = [
       { name: 'data', type: 'string', description: 'Request body data', required: false },
       { name: 'headers', type: 'string', description: 'Headers as "Key: Value" (comma separated)', required: false },
       { name: 'flags', type: 'string', description: 'Additional curl flags', required: false },
+      { name: 'authMode', type: 'string', description: 'Credential context: "inherit" (default — attach configured exact-origin headers) or "none" (deliberately unauthenticated request, for auth-vs-unauth baselines)', required: false },
     ],
     handler: async (context) => {
       if (!(await isToolAvailable('curl'))) {
@@ -3663,9 +3729,10 @@ export const EXTERNAL_TOOLS: CustomTool[] = [
       const data = context.parameters.data as string | undefined;
       const headers = context.parameters.headers as string | undefined;
       const flags = context.parameters.flags as string | undefined;
+      const authMode = resolveAuthMode(context.parameters.authMode);
 
       const args = ['-s', '-i', '-X', method];
-      let configuredHeaders = targetHeadersForUrl(url);
+      let configuredHeaders = targetHeadersForUrl(url, undefined, authMode);
       let configDir: string | undefined;
       if (data) {
         // A body starting with @ (read local file) or < (read stdin) turns curl into a local-file
@@ -3682,7 +3749,7 @@ export const EXTERNAL_TOOLS: CustomTool[] = [
             if (separator <= 0) return { success: false, error: `curl_request: invalid header '${header}'` };
             explicitHeaders.set(header.slice(0, separator).trim(), header.slice(separator + 1).trim());
           }
-          configuredHeaders = targetHeadersForUrl(url, explicitHeaders);
+          configuredHeaders = targetHeadersForUrl(url, explicitHeaders, authMode);
         } else {
           for (const header of headerLines) args.push('-H', header);
         }
@@ -3707,10 +3774,20 @@ export const EXTERNAL_TOOLS: CustomTool[] = [
         return redactConfiguredSecrets({
           success: result.exitCode === 0,
           output: result.stdout,
-          error: result.exitCode !== 0 ? result.stderr : undefined,
+          error: result.exitCode !== 0
+            ? `curl exited ${result.exitCode}${result.stderr ? `: ${result.stderr.slice(0, 500)}` : ''}`
+            : undefined,
+        });
+      } catch (handlerError) {
+        // Structural guarantee: an unexpected internal failure (tempdir, argv construction)
+        // returns a DIAGNOSTIC result naming the actual cause — it must not bubble into the
+        // arsenal's generic "execution_error" wrap with the reason destroyed.
+        return redactConfiguredSecrets({
+          success: false,
+          error: `curl_request internal failure: ${handlerError instanceof Error ? handlerError.message : String(handlerError)}`,
         });
       } finally {
-        if (configDir) await rm(configDir, { recursive: true, force: true });
+        if (configDir) await rm(configDir, { recursive: true, force: true }).catch(() => { });
       }
     },
   },

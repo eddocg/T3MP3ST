@@ -233,6 +233,64 @@ describe('finding dedup — reworded same-category observations consolidate', ()
     expect(vault.getAllFindings().length).toBe(2);
     expect(vault.consolidatedFindings).toBe(1);
   });
+
+  it('REAL ingestion path: nuclei CORS on / + second-tool CORS on / merge into ONE candidate; /oauth2/authorize stays DISTINCT', async () => {
+    // Exercises the actual new ingestion path end-to-end:
+    //   nuclei JSONL → parseToolOutput (canonical category) → operator-style Finding conversion
+    //   → EvidenceVault.addFinding fingerprint merge.
+    const { parseToolOutput } = await import('../arsenal/parsers.js');
+
+    // ── Tool/Nuclei observation: CORS on / ──────────────────────────────────────
+    const nucleiLine = JSON.stringify({
+      'template-id': 'cors-misconfig',
+      host: 'https://api.example.test',
+      'matched-at': 'https://api.example.test/',
+      info: { name: 'CORS Misconfiguration', severity: 'medium', tags: ['cors', 'misconfig'] },
+    });
+    const nucleiFindings = parseToolOutput('nuclei', nucleiLine);
+    expect(nucleiFindings.length).toBe(1);
+    expect(nucleiFindings[0].category).toBe('cors'); // canonical category derived, not title-slug
+
+    // Operator conversion (mirrors src/operators/index.ts: tool-backed finding → Finding).
+    const toFinding = (tf: ReturnType<typeof parseToolOutput>[number], tool: string) => makeFinding({
+      title: tf.title,
+      severity: tf.severity,
+      category: tf.category,
+      evidence: [{ type: 'output', content: tf.details, timestamp: Date.now(), metadata: { tool } }],
+    });
+    const stored1 = toFinding(nucleiFindings[0], 'nuclei');
+    const vault = new EvidenceVault(); // (single vault for the whole scenario)
+    vault.addFinding(stored1);
+    expect(vault.getAllFindings().length).toBe(1);
+
+    // ── Second tool observation: SAME CORS condition on / (reworded template) ──
+    const nucleiLine2 = JSON.stringify({
+      'template-id': 'cors-any-origin-with-credentials',
+      host: 'https://api.example.test',
+      'matched-at': 'https://api.example.test/',
+      info: { name: 'Credentialed arbitrary-origin CORS', severity: 'high', tags: ['cors'], description: 'Reflected origin with ACAC:true observed' },
+    });
+    const second = parseToolOutput('nuclei', nucleiLine2);
+    expect(second.length).toBe(1);
+    expect(second[0].category).toBe('cors');
+    vault.addFinding(toFinding(second[0], 'nuclei'));
+    // ONE canonical candidate, both evidence observations attached, asserted severity deflated.
+    expect(vault.getAllFindings().length).toBe(1);
+    expect(vault.consolidatedFindings).toBe(1);
+    expect(vault.getAllFindings()[0].evidence.length).toBe(2);
+
+    // ── Same category on a GENUINELY different route stays a DISTINCT candidate ──
+    const nucleiLine3 = JSON.stringify({
+      'template-id': 'cors-misconfig',
+      host: 'https://api.example.test',
+      'matched-at': 'https://api.example.test/oauth2/authorize',
+      info: { name: 'CORS Misconfiguration', severity: 'medium', tags: ['cors'] },
+    });
+    const third = parseToolOutput('nuclei', nucleiLine3);
+    vault.addFinding(toFinding(third[0], 'nuclei'));
+    expect(vault.getAllFindings().length).toBe(2);
+    expect(vault.consolidatedFindings).toBe(1); // unchanged — the /oauth2/authorize row is new
+  });
 });
 
 describe('finding maturity — unverified CORS cannot be mature HIGH', () => {
@@ -249,7 +307,7 @@ describe('finding maturity — unverified CORS cannot be mature HIGH', () => {
     expect(capabilitySupported(stored)).toBe(false);
   });
 
-  it('CORS with reflected-ACAO evidence is a SUPPORTED observation — still never capability-verified', () => {
+  it('reflected ACAO + ACAC:true WITHOUT a demonstrated sensitive cross-origin read caps at LOW (never medium/high/critical)', () => {
     const vault = new EvidenceVault();
     const stored = vault.addFinding(makeFinding({
       title: 'Credentialed CORS origin reflection',
@@ -259,7 +317,49 @@ describe('finding maturity — unverified CORS cannot be mature HIGH', () => {
     }));
     expect(stored.claimSupport?.supportLevel).toBe('supported');
     expect(capabilitySupported(stored)).toBe(false); // observation category — never a demonstrated capability
-    expect(auditedSeverity(stored)).toBe('high'); // supported observations keep asserted severity
+    // Required semantics: arbitrary/reflected ACAO + ACAC:true is a supported CONFIGURATION
+    // observation, not demonstrated authenticated impact — INFO/LOW maximum. The scanner calling
+    // the probe "with credentials" is NOT a demonstrated victim-browser sensitive read.
+    expect(stored.claimSupport?.severityCap).toBe('low');
+    expect(auditedSeverity(stored)).toBe('low');
+    // Asserted severity is preserved separately (never rewritten away)…
+    expect(stored.severity).toBe('high');
+    // …and an asserted-CRITICAL observation of the same condition caps identically. (Evidence
+    // origins differ — attacker.example vs evil.example — so these are two distinct boundaries
+    // and MUST NOT merge; each is independently capped.)
+    const critical = vault.addFinding(makeFinding({
+      title: 'CORS reflection with credentials (critical asserted)',
+      severity: 'critical',
+      category: 'cors',
+      evidence: [{ type: 'response', content: 'access-control-allow-origin: https://evil.example\naccess-control-allow-credentials: true', timestamp: Date.now() }],
+    }));
+    expect(critical.claimSupport?.supportLevel).toBe('supported');
+    expect(critical.claimSupport?.severityCap).toBe('low');
+    expect(auditedSeverity(critical)).toBe('low');
+    expect(critical.severity).toBe('critical'); // asserted preserved
+    expect(vault.getAllFindings().length).toBe(2);
+  });
+
+  it('plain CORS reflection/config evidence caps at low; swagger/version exposure caps at info', () => {
+    const vault = new EvidenceVault();
+    const cors = vault.addFinding(makeFinding({
+      title: 'CORS Misconfiguration',
+      severity: 'high',
+      category: 'cors',
+      evidence: [{ type: 'response', content: 'access-control-allow-origin: *', timestamp: Date.now() }],
+    }));
+    expect(cors.claimSupport?.supportLevel).toBe('supported');
+    expect(auditedSeverity(cors)).toBe('low');
+
+    const swagger = vault.addFinding(makeFinding({
+      title: 'OpenAPI specification exposed',
+      severity: 'critical',
+      category: 'info_disclosure',
+      evidence: [{ type: 'response', content: 'GET /swagger.json → {"openapi":"3.0.0"}', timestamp: Date.now() }],
+    }));
+    expect(swagger.claimSupport?.supportLevel).toBe('supported');
+    expect(auditedSeverity(swagger)).toBe('info'); // exposure ≠ critical impact
+    expect(swagger.severity).toBe('critical'); // asserted severity preserved separately
   });
 });
 
@@ -331,6 +431,72 @@ describe('sanitizeExternalFlags — curl "-D -" and attached-value safety', () =
   it('nmap: dangerous script flags consume their values; safe flags survive', () => {
     expect(sanitizeExternalFlags('nmap', '-sV --script /tmp/x --top-ports 100'))
       .toEqual(['-sV', '--top-ports', '100']);
+  });
+});
+
+// ═══════════════ 1c. CURL END-TO-END ADAPTER REGRESSION (P7) ═══════════════
+// The sanitizer unit tests above prove argv shape; this proves the REAL adapter path
+// (Arsenal.execute → handler → real curl → local HTTP server) never surfaces the
+// reported failure mode, and that a thrown tool error always carries its real message.
+
+describe('curl_request end-to-end — real curl through Arsenal.execute', () => {
+  it('executes "-sS -D - -o /dev/null --max-time 15" against a live server without an execution error', async () => {
+    const { createServer } = await import('http');
+    const { Arsenal, EXTERNAL_TOOLS, createToolContext } = await import('../arsenal/index.js');
+    const server = createServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ ok: true }));
+    });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const port = (server.address() as { port: number }).port;
+    try {
+      const arsenal = new Arsenal();
+      const curl = EXTERNAL_TOOLS.find((t) => t.name === 'curl_request')!;
+      arsenal.register(curl);
+      const result = await arsenal.execute('curl_request', createToolContext(undefined, {
+        url: `http://127.0.0.1:${port}/`,
+        flags: '-sS -D - -o /dev/null --max-time 15',
+      }));
+      expect(result.success).toBe(true);
+      expect(String(result.output)).toContain('200');
+      expect(String(result.output)).toContain('"ok":true');
+      expect(String(result.error ?? '')).not.toContain('option -');
+    } finally {
+      server.close();
+    }
+  });
+
+  it('a non-zero curl exit returns a diagnostic error (exit code + stderr), never a bare throw', async () => {
+    const { createServer } = await import('http');
+    const { Arsenal, EXTERNAL_TOOLS, createToolContext } = await import('../arsenal/index.js');
+    // Server that accepts then stalls — curl --max-time 2 forces exit 28 (timeout).
+    const server = createServer(() => { /* never respond */ });
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const port = (server.address() as { port: number }).port;
+    try {
+      const arsenal = new Arsenal();
+      arsenal.register(EXTERNAL_TOOLS.find((t) => t.name === 'curl_request')!);
+      const result = await arsenal.execute('curl_request', createToolContext(undefined, {
+        url: `http://127.0.0.1:${port}/hang`,
+        flags: '-sS --max-time 2',
+      }));
+      expect(result.success).toBe(false);
+      // Diagnostic: names the exit condition — NOT the destroyed generic "execution_error".
+      expect(String(result.error)).toMatch(/curl exited|internal failure/);
+    } finally {
+      server.close();
+    }
+  }, 15000);
+
+  it('P7 contract: thrown tool errors stay category-only (secret-safe); curl internal failures surface as diagnostic RESULTS', async () => {
+    // Thrown-error text is untrusted (may carry arbitrary secrets) — the agent loop must never
+    // forward it verbatim (pinned by agent-error-feedback.test.ts). The curl handler therefore
+    // converts any internal throw into a redacted diagnostic RESULT instead of throwing.
+    const agentSrc = readFileSync(join(__dirname, '..', 'agent', 'index.ts'), 'utf8');
+    expect(agentSrc).toContain('message: `Tool execution failed: ${err.category}`');
+    expect(agentSrc).not.toContain('message: err.message');
+    const arsenalSrc = readFileSync(join(__dirname, '..', 'arsenal', 'index.ts'), 'utf8');
+    expect(arsenalSrc).toContain('curl_request internal failure:');
   });
 });
 

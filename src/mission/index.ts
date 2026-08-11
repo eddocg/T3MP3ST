@@ -314,6 +314,16 @@ export class TaskQueue extends EventEmitter<TaskQueueEvents> {
   }
 
   /**
+   * Mark a task BLOCKED at runtime: the operator's structured disposition says the planned
+   * work could not execute (missing capability/fixture/tool contract). Terminal state —
+   * blocked work is NOT coverage and is never silently retried as pending; an operator
+   * retries it explicitly through the recovery path if the blocker is resolved.
+   */
+  block(taskId: string, reason: string): void {
+    this.updateStatus(taskId, 'blocked', { success: false, error: `blocked: ${reason}`, disposition: 'blocked', dispositionReason: reason });
+  }
+
+  /**
    * Remove a task
    */
   remove(taskId: string): Task | undefined {
@@ -591,10 +601,15 @@ export class MissionControl extends EventEmitter<MissionEvents> {
     const failed = count('failed');
     const blocked = count('blocked');
     const skipped = count('skipped');
+    // Coverage truth: a task whose structured disposition is no_eligible_work RAN but produced
+    // no eligible work — it must not make its phase read "executed" (coverage) on its own.
+    const executedTasks = phaseTasks.filter(
+      (t) => t.status === 'completed' && t.result?.disposition !== 'no_eligible_work',
+    ).length;
     const disposition: PhaseDisposition['disposition'] =
       phaseTasks.length === 0 ? 'no_eligible_work'
         : failed > 0 ? 'failed'
-          : completed > 0 ? 'executed'
+          : executedTasks > 0 ? 'executed'
             : blocked > 0 ? 'blocked_prerequisite'
               : 'no_eligible_work';
     if (!mission.phaseDispositions) mission.phaseDispositions = [];
@@ -850,7 +865,7 @@ export function createReconTasks(missionId: string, targetAddress: string, opts?
       id: randomUUID(),
       missionId,
       name: 'Authenticated Surface Baseline (current principal)',
-      description: `lane:baseline. A credential context is configured for the exact origin of ${targetAddress}. Establish the CURRENT principal's authenticated baseline, bounded and additive to broad coverage: (1) fetch a small set of representative routes (root, any discovered API index, one or two discovered resource routes) WITH the configured authenticated context and again WITHOUT it; (2) record the differential (status code, redirect, content-length/body hash) per route as evidence tagged authContextApplied; (3) note which surface is only visible authenticated. This is single-principal baseline work — do NOT attempt cross-principal (A/B) comparisons, do NOT probe other principals' resources, and do NOT treat this as authorization-boundary verification.`,
+      description: `lane:baseline. A credential context is configured for the exact origin of ${targetAddress}. Establish the CURRENT principal's authenticated baseline, bounded and additive to broad coverage: (1) fetch a small set of representative routes (root, any discovered API index, one or two discovered resource routes) WITH the configured authenticated context (http_request/curl_request default authMode "inherit") and again deliberately WITHOUT it (pass authMode "none" — a non-secret control that suppresses the configured credential context); (2) record the differential (status code, redirect, content-length/body hash) per route as evidence tagged authContextApplied; (3) note which surface is only visible authenticated. This is single-principal baseline work — do NOT attempt cross-principal (A/B) comparisons, do NOT probe other principals' resources, and do NOT treat this as authorization-boundary verification. If the request tools genuinely cannot execute, end with outcome "blocked" in the debrief (never narrate inability and finish as completed).`,
       phase: KillChainPhase.RECON,
       operatorType: 'scanner',
       status: 'pending',
@@ -1070,6 +1085,10 @@ export function deriveObjectiveCompletion(mission: Mission, tasks: Task[]): Obje
     const failedRequired = tasks.filter((t) => t.status === 'failed' && t.required !== false);
     const failedOptional = tasks.filter((t) => t.status === 'failed' && t.required === false);
     const skippedCount = tasks.filter((t) => t.status === 'skipped').length;
+    // Runtime-blocked planned work (operator reported the work could not execute — e.g. a
+    // missing capability/fixture) is NOT coverage. It degrades the outcome to partial and is
+    // named in the reason — never silently counted as completed.
+    const blockedRuntime = tasks.filter((t) => t.status === 'blocked');
 
     // Nothing eligible to run anywhere (or no tasks at all) — the mission exhausted itself.
     if (tasks.length === 0 || (dispositions.length > 0 && executedPhases.length === 0 && failedPhases.length === 0)) {
@@ -1087,6 +1106,20 @@ export function deriveObjectiveCompletion(mission: Mission, tasks: Task[]): Obje
         reason: `general mission — execution completed with ${failedRequired.length} failed required task(s)` +
           (failedPhases.length ? ` and failed phase(s) [${failedPhases.join(', ')}]` : '') +
           '; planned coverage not achieved',
+        blockedPrerequisites,
+        completedPrerequisites,
+      };
+    }
+    // Planned work reported itself BLOCKED at runtime (operator's structured disposition: the
+    // tool contract / fixture / capability to execute it did not exist). Returning normally is
+    // not success — blocked planned work is not coverage and must degrade the outcome.
+    if (blockedRuntime.length > 0) {
+      return {
+        outcome: 'partial',
+        reason: 'general mission — execution completed; ' +
+          `executed phase(s): [${executedPhases.join(', ') || 'none'}]` +
+          `; ${blockedRuntime.length} planned task(s) could not execute (blocked: ${blockedRuntime.map((t) => t.name).join('; ')}). ` +
+          'Blocked work is NOT claimed as coverage.',
         blockedPrerequisites,
         completedPrerequisites,
       };

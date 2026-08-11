@@ -465,7 +465,7 @@ export interface TaskAttempt {
   startedAt: number;
   endedAt?: number;
   /** terminal outcome of THIS attempt only. */
-  outcome: 'completed' | 'failed' | 'timeout' | 'timeout_late_success' | 'timeout_pending';
+  outcome: 'completed' | 'failed' | 'timeout' | 'timeout_late_success' | 'timeout_pending' | 'blocked';
   error?: string;
 }
 
@@ -500,6 +500,18 @@ export interface Task {
   attempts?: TaskAttempt[];
 }
 
+/**
+ * Structured task disposition — reported by the operator's agent loop via the debrief contract,
+ * NOT inferred from "the agent returned normally":
+ *  - completed:        the planned work actually executed (findings or legitimate empty result)
+ *  - blocked:          the planned work COULD NOT execute (missing capability / fixture / tool
+ *                      contract) — terminal, never counted as coverage
+ *  - no_eligible_work: the task ran and legitimately found nothing eligible to do (truthful
+ *                      negative; does not count as executed coverage for its phase)
+ *  - failed:           attempted but errored
+ */
+export type TaskDisposition = 'completed' | 'blocked' | 'no_eligible_work' | 'failed';
+
 export interface TaskResult {
   success: boolean;
   output?: string;
@@ -507,6 +519,10 @@ export interface TaskResult {
   credentials?: string[];
   nextTasks?: string[];
   error?: string;
+  /** Structured outcome of the attempt — see TaskDisposition. Absent = legacy (success flag only). */
+  disposition?: TaskDisposition;
+  /** Human-readable reason for blocked/no_eligible_work/failed dispositions. */
+  dispositionReason?: string;
 }
 
 // =============================================================================

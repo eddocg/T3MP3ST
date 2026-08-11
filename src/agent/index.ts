@@ -103,6 +103,15 @@ export interface AgentResult {
   hitLimit: boolean;
   /** Error from the forced final-summary call after hitting limits, if any */
   finalSummaryError?: string;
+  /**
+   * Structured task disposition from the debrief contract ("outcome" field). Absent means the
+   * model didn't declare one — the caller falls back to legacy success-flag semantics. A task
+   * that narrated "unable to start" but declared no outcome is NOT auto-promoted to completed
+   * by this field (it stays absent and the legacy path applies); the contract teaches the model
+   * to declare blocked/no_eligible_work explicitly.
+   */
+  disposition?: 'completed' | 'blocked' | 'no_eligible_work' | 'failed';
+  dispositionReason?: string;
 }
 
 export interface AgentEvents {
@@ -313,12 +322,15 @@ export class AgentLoop extends EventEmitter<AgentEvents> {
 
           // Parse the structured debrief block so the model's OWN analysis is captured —
           // previously only tool-emitted findings were kept and the final report was dropped.
-          for (const f of this.parseFinalFindings(response.content || '')) {
+          // Also carries the DECLARED task disposition (completed/blocked/no_eligible_work/
+          // failed) — "the agent returned normally" is never treated as success on its own.
+          const debrief = this.parseFinalDebrief(response.content || '');
+          for (const f of debrief.findings) {
             if (!allFindings.some((x) => x.title === f.title)) allFindings.push(f);
           }
 
           const result: AgentResult = {
-            success: true,
+            success: debrief.outcome === 'failed' || debrief.outcome === 'blocked' ? false : true,
             summary: response.content,
             steps,
             findings: allFindings,
@@ -326,6 +338,8 @@ export class AgentLoop extends EventEmitter<AgentEvents> {
             tokensUsed,
             durationMs: Date.now() - startTime,
             hitLimit: false,
+            disposition: debrief.outcome,
+            dispositionReason: debrief.outcomeReason,
           };
 
           this.emit('agent:complete', result);
@@ -358,14 +372,19 @@ export class AgentLoop extends EventEmitter<AgentEvents> {
 
     let summary = 'Agent reached iteration limit without producing a final summary.';
     let finalSummaryError: string | undefined;
+    let limitDisposition: AgentResult['disposition'];
+    let limitDispositionReason: string | undefined;
     try {
       const finalResponse = await this.llm.chat(messages, { maxTokens: 2048 });
       summary = finalResponse.content;
       tokensUsed += finalResponse.usage?.totalTokens || 0;
       // capture the structured debrief from the limit-summary too (same contract as the clean finish)
-      for (const f of this.parseFinalFindings(summary)) {
+      const debrief = this.parseFinalDebrief(summary);
+      for (const f of debrief.findings) {
         if (!allFindings.some((x) => x.title === f.title)) allFindings.push(f);
       }
+      limitDisposition = debrief.outcome;
+      limitDispositionReason = debrief.outcomeReason;
     } catch (error) {
       finalSummaryError = error instanceof Error ? error.message : String(error);
     }
@@ -380,6 +399,8 @@ export class AgentLoop extends EventEmitter<AgentEvents> {
       durationMs: Date.now() - startTime,
       hitLimit,
       finalSummaryError,
+      disposition: limitDisposition,
+      dispositionReason: limitDispositionReason,
     };
 
     this.emit('agent:complete', result);
@@ -438,6 +459,11 @@ export class AgentLoop extends EventEmitter<AgentEvents> {
     } catch (err) {
       // ToolError carries a category — use it for structured feedback to the LLM.
       if (err instanceof ToolError) {
+        // THROWN errors are untrusted internal faults: their raw text may contain arbitrary
+        // secrets with shapes no pattern redactor can guarantee (pinned by
+        // agent-error-feedback.test.ts). The LLM gets the category only. OPERATIONAL failures
+        // (curl non-zero exit, probe refused, …) must instead be RETURNED as redacted tool
+        // results — handlers own that contract (see curl_request's internal-failure catch).
         toolResult = {
           success: false,
           error: JSON.stringify({
@@ -560,8 +586,13 @@ export class AgentLoop extends EventEmitter<AgentEvents> {
       parts.push(`2. Analyze each result before deciding the next action`);
       parts.push(`3. Report findings immediately as you discover them`);
       parts.push(`4. When finished, END your final message with a single fenced \`\`\`json block:\n` +
-        `   {"findings":[{"title":"…","severity":"critical|high|medium|low|info","details":"… cite the tool output that evidences it …","cvss":0.0,"cve":["…"],"remediation":"…"}],"abstained":false}\n` +
-        `   This block is the ONLY finding channel the harness records — anything described only in prose is dropped. Emit [] findings + "abstained":true if you found nothing real.`);
+        `   {"findings":[{"title":"…","severity":"critical|high|medium|low|info","details":"… cite the tool output that evidences it …","cvss":0.0,"cve":["…"],"remediation":"…"}],"abstained":false,"outcome":"completed|blocked|no_eligible_work|failed","outcomeReason":"…"}\n` +
+        `   This block is the ONLY finding channel the harness records — anything described only in prose is dropped. Emit [] findings + "abstained":true if you found nothing real.\n` +
+        `   outcome semantics (declare honestly — returning normally is NOT treated as success):\n` +
+        `   - "completed": the planned work actually executed (whether or not it produced findings — a real negative result is still completed)\n` +
+        `   - "blocked": the planned work COULD NOT execute (missing tool capability, missing fixture, tool contract gap) — say why in outcomeReason\n` +
+        `   - "no_eligible_work": you assessed and there was legitimately nothing eligible to do for this task\n` +
+        `   - "failed": you attempted the work and it errored`);
     }
 
     return parts.join('\n');
@@ -619,23 +650,28 @@ export class AgentLoop extends EventEmitter<AgentEvents> {
   }
 
   /**
-   * Parse the model's final debrief block into structured findings. The operator is told to
-   * end its last message with a fenced ```json {findings:[…]} block; this is the ONLY prose→data
-   * channel the harness honors (no substring guessing). Returns [] if there's no valid block.
+   * Parse the model's final debrief block into structured findings + task disposition. The
+   * operator is told to end its last message with a fenced ```json {findings:[…]} block; this
+   * is the ONLY prose→data channel the harness honors. FENCED-ONLY by contract: narrative
+   * prose, SITREPs, and status text are NEVER scanned for findings — a message without a fenced
+   * debrief block yields nothing, so words like "critical"/"RCE"/"credential" in prose can
+   * never manufacture a finding.
    */
-  private parseFinalFindings(content: string): ToolFinding[] {
-    if (!content) return [];
+  private parseFinalDebrief(content: string): { findings: ToolFinding[]; outcome?: 'completed' | 'blocked' | 'no_eligible_work' | 'failed'; outcomeReason?: string } {
+    const EMPTY: { findings: ToolFinding[] } = { findings: [] };
+    if (!content) return EMPTY;
     const SEV = new Set(['critical', 'high', 'medium', 'low', 'info']);
+    const OUTCOMES = new Set(['completed', 'blocked', 'no_eligible_work', 'failed']);
     const blocks = [...content.matchAll(/```(?:json)?\s*([\s\S]*?)```/g)].map((m) => m[1]);
-    const candidates = blocks.length ? blocks.reverse() : [content];
-    for (const c of candidates) {
+    if (!blocks.length) return EMPTY; // no fenced debrief block → NO findings from prose. Contract.
+    for (const c of blocks.reverse()) {
       const start = c.indexOf('{');
       const end = c.lastIndexOf('}');
       if (start === -1 || end <= start) continue;
       try {
         const obj = JSON.parse(c.slice(start, end + 1));
         if (!obj || !Array.isArray(obj.findings)) continue;
-        return obj.findings.filter((f: any) => f && f.title).map((f: any) => ({
+        const findings = obj.findings.filter((f: any) => f && f.title).map((f: any) => ({
           title: String(f.title).slice(0, 200),
           severity: (SEV.has(String(f.severity).toLowerCase()) ? String(f.severity).toLowerCase() : 'info') as Severity,
           details: String(f.details ?? f.evidence ?? f.evidence_ref ?? '').slice(0, 4000),
@@ -645,9 +681,16 @@ export class AgentLoop extends EventEmitter<AgentEvents> {
           // Model-asserted in the debrief — NO tool provenance. The gate downgrades these.
           provenance: 'model' as const,
         }));
+        // Structured task disposition — declared, never inferred from prose tone.
+        const rawOutcome = String(obj.outcome ?? '').toLowerCase();
+        const outcome = OUTCOMES.has(rawOutcome) ? rawOutcome as 'completed' | 'blocked' | 'no_eligible_work' | 'failed' : undefined;
+        const outcomeReason = typeof obj.outcomeReason === 'string' && obj.outcomeReason.trim()
+          ? obj.outcomeReason.trim().slice(0, 500)
+          : undefined;
+        return { findings, outcome, outcomeReason };
       } catch { /* try the next candidate block */ }
     }
-    return [];
+    return EMPTY;
   }
 }
 

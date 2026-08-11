@@ -501,6 +501,10 @@ export class OperatorAgent extends EventEmitter<OperatorEvents> {
           : undefined,
         findings: result.findings.map(f => f.title),
         nextTasks: undefined,
+        // STRUCTURED DISPOSITION: the debrief-declared outcome. "The agent returned normally"
+        // is not proof of executed coverage — the dispatcher consumes this field first.
+        disposition: result.disposition,
+        dispositionReason: result.dispositionReason,
       };
     }
 

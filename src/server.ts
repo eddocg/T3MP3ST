@@ -7116,6 +7116,8 @@ app.get('/api/mission/status', (_req: Request, res: Response) => {
       phase: f.phase,
       operatorId: f.operatorId,
       discoveredAt: f.discoveredAt,
+      // Human target origin/address (the poll consumer must never render the internal UUID).
+      targetAddress: cmd.targetEnv.getAllTargets().find((t) => t.id === f.targetId)?.address ?? f.targetId,
     })),
   }));
 });

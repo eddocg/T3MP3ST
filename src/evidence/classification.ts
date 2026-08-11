@@ -34,6 +34,13 @@ function capSeverity(asserted: Severity, cap: Severity): Severity {
 interface CategoryRule {
   signals: string[];
   capWhenUnsupported: Severity;
+  /**
+   * OBSERVATION categories only: the ceiling when the evidence DOES carry the category signal.
+   * "Supported" for an observation means "the configuration/exposure is real" — it says nothing
+   * about attacker IMPACT, so it must never uncap to critical. Impact-bearing categories leave
+   * this unset (a demonstrated capability is allowed to carry high/critical).
+   */
+  capWhenSupported?: Severity;
   observation?: boolean;
   note: string;
 }
@@ -52,6 +59,12 @@ const CATEGORY_RULES: Record<string, CategoryRule> = {
   cors: {
     signals: ['access-control-allow-origin', 'acao', 'access-control-allow-credentials'],
     capWhenUnsupported: 'low',
+    // ACAO reflection + ACAC:true is a supported CONFIGURATION observation — never demonstrated
+    // authenticated impact by itself (a scanner labeling a probe "with credentials" is not a
+    // demonstrated victim-browser sensitive cross-origin read). INFO/LOW maximum until a real
+    // read/action capability is evidenced — which would be a separate capability claim with its
+    // own evidence, not a header observation.
+    capWhenSupported: 'low',
     observation: true,
     note: 'CORS reflection is a configuration observation until authenticated sensitive cross-origin impact is demonstrated.',
   },
@@ -74,14 +87,33 @@ const CATEGORY_RULES: Record<string, CategoryRule> = {
   cleartext: {
     signals: ['http://', 'cleartext', 'no tls', 'plain http'],
     capWhenUnsupported: 'low',
+    capWhenSupported: 'low',
     observation: true,
     note: 'Cleartext HTTP is a transport observation; it is not RCE or credential compromise on its own.',
   },
   info_disclosure: {
     signals: ['version', 'server:', 'x-powered-by', 'swagger', 'openapi', 'banner'],
     capWhenUnsupported: 'info',
+    // Version/banner/spec exposure is informational unless the exposed material is itself
+    // sensitive (that re-categorizes as credential). "Supported" here means "the exposure is
+    // real", not "impact demonstrated".
+    capWhenSupported: 'info',
     observation: true,
     note: 'Version/banner/spec exposure is reconnaissance context, not a vulnerability by itself.',
+  },
+  headers: {
+    signals: ['strict-transport-security', 'content-security-policy', 'x-frame-options', 'x-content-type-options', 'missing', 'security header'],
+    capWhenUnsupported: 'info',
+    capWhenSupported: 'info',
+    observation: true,
+    note: 'Missing/weak security headers are a hardening observation — they set up no exploit by themselves.',
+  },
+  tls: {
+    signals: ['cipher', 'tls', 'ssl', 'certificate', 'x.509'],
+    capWhenUnsupported: 'info',
+    capWhenSupported: 'low',
+    observation: true,
+    note: 'Weak TLS/cipher/certificate posture is a configuration observation absent a demonstrated interception/downgrade.',
   },
 };
 
@@ -110,12 +142,18 @@ export function deriveCategory(f: { category?: string; cwe?: string[]; title?: s
   const title = (f.title || '').toLowerCase();
   const text = `${cwe} ${title}`;
   if (/cwe-?(78|94|95)\b|\brce\b|remote code|command injection|code execution/.test(text)) return 'rce';
-  if (/cwe-?(798|522|312|319)\b|credential|password|secret|token/.test(text)) return 'credential';
+  // CORS before credential: CORS findings routinely mention "credentials" incidentally (ACAC),
+  // e.g. nuclei "cors-any-origin-with-credentials" — they are CORS observations, not credential
+  // disclosures. A real credential finding carries disclosure vocabulary and no CORS token.
   if (/cors|cross-origin|access-control/.test(text)) return 'cors';
+  if (/cwe-?(798|522|312|319)\b|credential|password|secret|token/.test(text)) return 'credential';
   if (/cwe-?89\b|sql.?injection|\bsqli\b/.test(text)) return 'sqli';
   if (/cwe-?79\b|xss|cross-site scripting/.test(text)) return 'xss';
   if (/cwe-?(639|862|863|285)\b|bola|bfla|idor|authorization|access control|privilege/.test(text)) return 'authz';
   if (/cleartext|http only|no tls|plain http|insecure transport/.test(text)) return 'cleartext';
+  // Order matters: headers/TLS hardening observations before the generic info_disclosure bucket.
+  if (/security.?headers?|missing.?headers?|strict-transport|content-security-policy|x-frame-options|x-content-type|\bhsts\b/.test(text)) return 'headers';
+  if (/weak.?cipher|cipher.?suite|deprecated.?(tls|ssl)|\btls\b.?1\.[01]|sslv\d|certificate|x\.509|\btls\b|\bssl\b/.test(text)) return 'tls';
   if (/version|banner|swagger|openapi|server header|fingerprint|disclosure/.test(text)) return 'info_disclosure';
   return 'general';
 }
@@ -153,11 +191,20 @@ export function assessClaimSupport(f: Finding): ClaimSupport {
 
   const hit = rule.signals.find((sig) => corpus.includes(sig));
   if (hit) {
+    // CAPABILITY-AWARE CEILING: a category signal means "the condition is real", not "impact is
+    // demonstrated". Impact categories (rce/sqli/xss/authz/credential) may carry full severity
+    // when their signal is present; OBSERVATION categories (cors/headers/tls/info_disclosure/
+    // cleartext) stay capped — a real configuration observation is not a demonstrated capability.
+    // CORS explicitly gets NO credentialed-reflection promotion: reflected ACAO + ACAC:true is
+    // still a configuration observation; only a demonstrated authenticated sensitive cross-origin
+    // read/action (a separate capability claim with its own evidence) can carry real severity.
+    const cap: Severity = rule.observation ? (rule.capWhenSupported ?? 'low') : 'critical';
     return {
       category,
       supportLevel: 'supported',
-      severityCap: 'critical', // evidence supports the category; severity is not capped by this gate
-      rationale: `evidence contains a ${category} signal ("${hit}") consistent with the claim`,
+      severityCap: cap,
+      rationale: `evidence contains a ${category} signal ("${hit}") consistent with the claim` +
+        (rule.observation ? `; observation-category ceiling ${cap} (configuration support ≠ impact)` : ''),
       checkedAt,
     };
   }
@@ -240,12 +287,20 @@ export function findingFingerprint(f: {
     selector = selector || String(meta.selector ?? meta.parameter ?? meta.param ?? '');
     boundary = boundary || String(meta.boundary ?? '');
     // Derive origin/route from a request/response evidence URL if not explicitly tagged.
+    // The path group must be OPTIONAL — a bare origin ("https://host" with no trailing slash,
+    // common in header evidence like ACAO) must still extract the origin or every header-only
+    // observation collapses onto the targetId fallback and over-merges across real boundaries.
+    // When MULTIPLE URLs appear (e.g. nuclei "host: <origin> | matched-at: <origin>/oauth2/…"),
+    // prefer the FIRST URL carrying a real path for the route — the bare host URL is origin-only
+    // and must not mask the actual boundary the observation fired on.
     if (!origin || !route) {
-      const m = String(e?.content ?? '').match(/https?:\/\/([^\s/"'/)]+)(\/[^\s"')]*)/i);
-      if (m) {
-        origin = origin || m[1].toLowerCase();
-        route = route || (m[2] || '/').split('?')[0];
+      const urls = String(e?.content ?? '').matchAll(/https?:\/\/([^\s/"'/)]+)(\/[^\s"')]*)?/gi);
+      for (const m of urls) {
+        if (!origin) origin = m[1].toLowerCase();
+        const path = (m[2] || '').split('?')[0];
+        if (!route && path && path !== '/') route = path;
       }
+      if (!route && origin) route = '/';
     }
   }
   if (!origin) origin = String(f.targetId ?? 'unknown').toLowerCase();

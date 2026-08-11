@@ -6367,8 +6367,12 @@ tempest.operators.<span class="function">spawn</span>(<span class="string">'scan
                                 addFinding?.({
                                     severity: finding.severity || 'info',
                                     title: finding.title,
-                                    target: finding.targetId || 'unknown',
-                                    evidence: (finding.evidence && finding.evidence.length) ? `${finding.evidence.length} evidence item(s)` : '',
+                                    // Human target origin/address — never the internal UUID.
+                                    target: finding.targetAddress || finding.targetId || 'unknown',
+                                    // Structured evidence items (redacted server-side) — the detail
+                                    // view renders them intentionally; never a count-only blob.
+                                    evidenceItems: Array.isArray(finding.evidence) ? finding.evidence : [],
+                                    detail: typeof finding.description === 'string' ? finding.description : '',
                                     provenance: finding.verifyGate?.provenance || '',
                                     verifyGate: finding.verifyGate || null,
                                     verifiedAt: finding.verifiedAt || null,
@@ -6554,7 +6558,16 @@ tempest.operators.<span class="function">spawn</span>(<span class="string">'scan
                             const data = JSON.parse(e.data);
                             narrate('sitrep', data);
                             addIntel('SITREP', data.assessment || 'Situation report received', data.needsAdaptation ? 'warning' : 'info');
-                            try { if (typeof updateSitRep === 'function') updateSitRep(false, '⚓ ' + (data.assessment || 'Situation report received'), 'ACTIVE'); } catch (_) {}
+                            // A late SITREP for a TERMINAL mission must not flip the widget back to
+                            // ACTIVE — the completion poll owns the COMPLETE state. Only headline
+                            // narration updates; the status chip is left to the authoritative poll.
+                            try {
+                                if (typeof updateSitRep === 'function') {
+                                    const chip = document.getElementById('sitrepStatus');
+                                    const terminal = chip && chip.textContent === 'COMPLETE';
+                                    updateSitRep(false, '⚓ ' + (data.assessment || 'Situation report received'), terminal ? undefined : 'ACTIVE');
+                                }
+                            } catch (_) {}
                             renderGeneralSitrep(data);
                         } catch {}
                     });
@@ -8705,7 +8718,7 @@ o.id === 'coordinator' ? `1. MISSION_STATUS: Progress assessment
             const sevColors = { critical: '#ff0040', high: '#ff4444', medium: '#ffaa00', low: '#0088ff', info: '#888' };
             const color = sevColors[(f.severity || 'info')] || '#888';
             const kv = (label, val) => (val || val === 0) ? `<div style="color:#666;">${label}</div><div style="color:#ccc;word-break:break-word;">${escapeHtml(String(val))}</div>` : '';
-            const modelAsserted = (f.provenance || '').toLowerCase() !== 'tool' || !(f.evidence && String(f.evidence).trim());
+            const modelAsserted = (f.provenance || '').toLowerCase() !== 'tool' || (!(f.evidence && String(f.evidence).trim()) && !(f.evidenceItems && f.evidenceItems.length));
             openModal(`[${(f.severity || 'info').toUpperCase()}] ${f.title || 'Finding'}`, `
                 <div style="font-family:'JetBrains Mono',monospace;font-size:11px;line-height:1.5;">
                     <div style="display:grid;grid-template-columns:92px 1fr;gap:6px 10px;margin-bottom:12px;">
@@ -8722,7 +8735,19 @@ o.id === 'coordinator' ? `1. MISSION_STATUS: Progress assessment
                     </div>
                     ${f.detail ? `<div style="color:#666;margin-bottom:3px;text-transform:uppercase;font-size:9px;letter-spacing:0.5px;">Detail</div><div style="color:#ddd;white-space:pre-wrap;word-break:break-word;margin-bottom:12px;padding:8px;background:rgba(0,0,0,0.3);border-radius:4px;border-left:2px solid ${color};">${escapeHtml(String(f.detail))}</div>` : ''}
                     <div style="color:#666;margin-bottom:3px;text-transform:uppercase;font-size:9px;letter-spacing:0.5px;">Evidence</div>
-                    ${f.evidence ? `<div style="color:#9fd6c0;white-space:pre-wrap;word-break:break-word;padding:8px;background:rgba(0,0,0,0.4);border-radius:4px;">${escapeHtml(String(f.evidence))}</div>` : '<div style="color:#777;font-style:italic;">No tool-backed evidence attached — this finding is model-asserted and unverified.</div>'}
+                    ${(f.evidenceItems && f.evidenceItems.length)
+                        ? f.evidenceItems.map(ev => {
+                            const tool = ev && ev.metadata && ev.metadata.tool ? String(ev.metadata.tool) : (ev && ev.type ? String(ev.type) : 'evidence');
+                            const when = ev && ev.timestamp ? new Date(ev.timestamp).toLocaleTimeString('en-US', { hour12: false }) : '';
+                            const content = ev && typeof ev.content === 'string' ? ev.content : '';
+                            return `<div style="margin-bottom:8px;padding:8px;background:rgba(0,0,0,0.4);border-radius:4px;border-left:2px solid #2a5;">` +
+                                `<div style="color:#557;font-size:9px;margin-bottom:4px;">${escapeHtml(tool)}${when ? ' · ' + escapeHtml(when) : ''}</div>` +
+                                (content ? `<div style="color:#9fd6c0;white-space:pre-wrap;word-break:break-word;max-height:220px;overflow:auto;">${escapeHtml(content.slice(0, 3000))}</div>` : '<div style="color:#777;font-style:italic;">(no captured content)</div>') +
+                                `</div>`;
+                        }).join('')
+                        : (f.evidence
+                            ? `<div style="color:#9fd6c0;white-space:pre-wrap;word-break:break-word;padding:8px;background:rgba(0,0,0,0.4);border-radius:4px;">${escapeHtml(String(f.evidence))}</div>`
+                            : '<div style="color:#777;font-style:italic;">No tool-backed evidence attached — this finding is model-asserted and unverified.</div>')}
                 </div>
             `);
         }
@@ -15240,10 +15265,10 @@ Be brutally honest. This is not a pep talk.`;
             // Mirror into the LLM-queue popup's live log so the operator sees what the
             // harness is launching in real time. Runs regardless of the legacy intelFeed.
             try { pushLLMLog(source, message, type); } catch (_) {}
-            // Findings extraction must run even when the legacy console feed is absent
-            if (typeof window._extractFindings === 'function') {
-                try { window._extractFindings(source, message); } catch (_) {}
-            }
+            // Findings NEVER enter the pipeline from narrative prose (SITREPs, progress
+            // summaries, operator narration). Findings arrive only via the structured
+            // SSE finding channel / mission-context API — the old regex "auto-extraction"
+            // manufactured CRITICAL/HIGH findings from prose words like "rce"/"credential".
             const feed = document.getElementById('intelFeed');
             if (!feed) return;
 
@@ -15394,6 +15419,9 @@ Be brutally honest. This is not a pep talk.`;
                 phase: finding.phase || MissionContext.currentPhase || '-',
                 detail: finding.detail || '',
                 evidence: finding.evidence || '',
+                // Structured evidence items [{type, content, timestamp, metadata}] — redacted
+                // server-side. Rendered intentionally in the detail view; never "[object Object]".
+                evidenceItems: Array.isArray(finding.evidenceItems) ? finding.evidenceItems : [],
                 provenance: finding.provenance || '',
                 verifyGate: finding.verifyGate || null,
                 verifiedAt: finding.verifiedAt || null,
@@ -19486,63 +19514,13 @@ IMPORTANT: This is an authorized security testing/red team platform. All operati
             }
         });
 
-        // ═══════════ AUTO-EXTRACT FINDINGS FROM PIPELINE ═══════════
-        // Wrap addIntel to auto-detect findings from operator output
-        (function() {
-            const _origAddIntel = window.addIntel || addIntel;
-            const vulnPatterns = [
-                { pattern: /sql\s*injection|sqli/i, severity: 'critical', type: 'vuln' },
-                { pattern: /remote\s*code\s*execution|rce/i, severity: 'critical', type: 'vuln' },
-                { pattern: /command\s*injection/i, severity: 'critical', type: 'vuln' },
-                { pattern: /xss|cross.site\s*script/i, severity: 'high', type: 'vuln' },
-                { pattern: /directory\s*traversal|path\s*traversal|lfi|rfi/i, severity: 'high', type: 'vuln' },
-                { pattern: /authentication\s*bypass|auth\s*bypass/i, severity: 'high', type: 'vuln' },
-                { pattern: /ssrf|server.side\s*request/i, severity: 'high', type: 'vuln' },
-                { pattern: /csrf|cross.site\s*request/i, severity: 'medium', type: 'vuln' },
-                { pattern: /information\s*disclosure|info\s*leak/i, severity: 'medium', type: 'vuln' },
-                { pattern: /open\s*redirect/i, severity: 'low', type: 'vuln' },
-                { pattern: /missing\s*header|security\s*header/i, severity: 'low', type: 'vuln' },
-                { pattern: /CVE-\d{4}-\d+/i, severity: 'high', type: 'vuln' }
-            ];
-            const credPatterns = [
-                { pattern: /password[:\s]+\S+|passwd[:\s]+\S+/i, severity: 'critical', type: 'cred' },
-                { pattern: /credential|cred[s]?\s*found/i, severity: 'high', type: 'cred' },
-                { pattern: /api[_\s]?key|token[:\s]+\S{8,}/i, severity: 'high', type: 'cred' },
-                { pattern: /hash(es)?\s*(found|dumped|extracted)/i, severity: 'high', type: 'cred' }
-            ];
-            const accessPatterns = [
-                { pattern: /shell\s*(obtained|established|spawned)/i, severity: 'critical', type: 'access' },
-                { pattern: /root\s*access|admin\s*access|system\s*access/i, severity: 'critical', type: 'access' },
-                { pattern: /reverse\s*shell|bind\s*shell/i, severity: 'critical', type: 'access' },
-                { pattern: /privilege\s*escalat/i, severity: 'high', type: 'access' },
-                { pattern: /lateral\s*movement/i, severity: 'high', type: 'access' }
-            ];
-            const allPatterns = [...vulnPatterns, ...credPatterns, ...accessPatterns];
-
-            window._extractFindings = function(source, message) {
-                if (!message || message.length < 20) return;
-                for (const p of allPatterns) {
-                    const match = message.match(p.pattern);
-                    if (match) {
-                        const title = match[0];
-                        const target = MissionContext.targets[0] ? (typeof MissionContext.targets[0] === 'string' ? MissionContext.targets[0] : MissionContext.targets[0].host || '') : '-';
-                        const exists = missionFindings.some(f => f.title.toLowerCase() === title.toLowerCase() && f.target === target);
-                        if (!exists) {
-                            addFinding({
-                                severity: p.severity,
-                                type: p.type,
-                                title: title,
-                                target: target,
-                                phase: MissionContext.currentPhase || source,
-                                detail: message.substring(0, 200),
-                                evidence: ''
-                            });
-                        }
-                        break;
-                    }
-                }
-            };
-        })();
+        // ═══════════ FINDINGS PIPELINE — STRUCTURED ONLY ═══════════
+        // REMOVED: the old regex-based prose-extraction block. It pattern-matched ANY narrative
+        // intel/SITREP/progress text for severity-flavored words ("rce", "credential",
+        // "sql injection", …) and manufactured CRITICAL/HIGH findings with no evidence, no
+        // provenance, and target "-". Findings enter the UI only through the structured
+        // channels: the SSE `finding` event, /api/mission/findings, and mission-context — all
+        // backed by the canonical finding pipeline with provenance.
 
         // Filter intel feed
         function filterFeed(type) {
@@ -19989,6 +19967,20 @@ IMPORTANT: This is an authorized security testing/red team platform. All operati
                             const _outcome = term.objectiveOutcome ? (' — objective ' + String(term.objectiveOutcome).toUpperCase()) : '';
                             const _hl = _isDefault ? ('✅ Mission complete' + _outcome) : null;
                             updateSitRep(term.finalPhase || null, _hl, 'COMPLETE');
+                            // Reconcile the client-counted kill chain from the AUTHORITATIVE terminal
+                            // phase dispositions — phases that closed as no_eligible_work/blocked never
+                            // emitted a progress=100 event, so the counter would stick below N/N.
+                            try {
+                                const _disp = Array.isArray(term.phaseDispositions) ? term.phaseDispositions : [];
+                                if (_disp.length && typeof updateKillChain === 'function') {
+                                    const _abbr = { reconnaissance:'recon', weaponization:'scanning', delivery:'scanning', exploitation:'exploitation', installation:'postex', command_and_control:'exfil', actions_on_objectives:'exfil' };
+                                    const _seen = new Set();
+                                    for (const d of _disp) {
+                                        const mapped = _abbr[String(d.phase)] || null;
+                                        if (mapped && !_seen.has(mapped)) { _seen.add(mapped); updateKillChain(mapped, 100); }
+                                    }
+                                }
+                            } catch (_) {}
                         } else {
                             updateSitRep(phase || null, 'Awaiting orders — point at a target and engage.', 'STANDBY');
                         }
@@ -20297,7 +20289,8 @@ IMPORTANT: This is an authorized security testing/red team platform. All operati
                                 !missionFindings.some(sf => sf.title === f.title)
                             );
                             newFindings.forEach(f => {
-                                addFinding({ severity: f.severity || 'info', title: f.title, target: f.targetId || target });
+                                // Human target origin/address first — never the internal UUID.
+                                addFinding({ severity: f.severity || 'info', title: f.title, target: f.targetAddress || f.targetId || target });
                             });
                         }
                     }, 3000);
