@@ -254,6 +254,9 @@ import { LLMBackbone } from './llm/index.js';
 import { getLLMConfig, config } from './config/index.js';
 import { AgentLoop } from './agent/index.js';
 import { OpGeneral } from './general/index.js';
+import { SurfaceModel, type SurfaceSnapshot, type SurfaceStats } from './surface/model.js';
+import { parseOpenApi } from './surface/openapi.js';
+import { setSurfaceSink, clearSurfaceSink, buildSurfaceContext } from './surface/context.js';
 
 // Stubs for advanced modules
 import {
@@ -529,11 +532,16 @@ export class TempestCommand extends EventEmitter<CommandEvents> {
       // genuine 'completed' terminal state from a bare 'idle'/stopped command (never collapse
       // active:false into completed, and never collapse completed into aborted).
       this.completedFlag = true;
+      // Freeze the mutable surface model into an immutable, redacted terminal snapshot BEFORE stop()
+      // tears the mission down — this is what makes GET /api/mission/surface work post-completion.
+      this.finalizeSurface(mission.id, true);
       this.emit('mission:completed', mission);
       this.stop();
     });
 
     this.mission.on('mission:aborted', ({ mission, reason }) => {
+      // Abort/stop must NOT retain raw or derived spec state — destroy the mutable model, no snapshot.
+      this.finalizeSurface(mission.id, false);
       this.emit('mission:aborted', { mission, reason });
       this.stop();
     });
@@ -838,6 +846,10 @@ export class TempestCommand extends EventEmitter<CommandEvents> {
     this.paused = false;
     this.emit('command:started');
 
+    // Arm the pre-truncation OpenAPI ingest sink for THIS command's active mission. ScopeGuard-
+    // protected HTTP tooling routes complete spec bodies here before their output is truncated.
+    setSurfaceSink((origin, body, contentType) => this.ingestSurfaceArtifact(origin, body, contentType));
+
     // Start tick loop (1 second interval). Catch any tick error so a single bad tick
     // (e.g. a spawn hitting the pool cap) can never take down the whole server process.
     this.tickInterval = setInterval(() => {
@@ -898,6 +910,14 @@ export class TempestCommand extends EventEmitter<CommandEvents> {
     this.timedOutDispatches.clear();
     // Mission-scoped scan pacing authorization never leaks past the run that granted it.
     clearRuntimeScanPolicy();
+    // Disarm the surface ingest sink so no post-stop fetch can mutate a torn-down mission. If the
+    // mission didn't complete cleanly (operator abort/stop), destroy the mutable surface state
+    // WITHOUT retaining a terminal snapshot — raw/derived spec state must not outlive an abort.
+    clearSurfaceSink();
+    if (!this.completedFlag) {
+      const active = this.mission.getActiveMission();
+      if (active) this.finalizeSurface(active.id, false);
+    }
     if (this.tickInterval) {
       clearInterval(this.tickInterval);
       this.tickInterval = null;
@@ -1012,6 +1032,15 @@ export class TempestCommand extends EventEmitter<CommandEvents> {
 
   /** Whether the active mission reached a completed terminal state (distinct from idle/aborted). */
   private completedFlag: boolean = false;
+
+  /**
+   * Mission-scoped Web/API surface models (keyed by missionId). Populated by the pre-truncation
+   * OpenAPI ingest sink. The mutable model is destroyed on teardown; a completed mission keeps only
+   * an immutable, redacted `SurfaceSnapshot` (never the raw document body).
+   */
+  private surfaceModels = new Map<string, SurfaceModel>();
+  private terminalSurfaceSnapshots = new Map<string, SurfaceSnapshot>();
+  private latestTerminalSurfaceMissionId: string | null = null;
 
   /**
    * Main tick loop — seeds tasks, dispatches to operators, advances phases
@@ -1589,6 +1618,9 @@ export class TempestCommand extends EventEmitter<CommandEvents> {
       // ROE constraints, and the registered tool names for this session. Kills the two false
       // blockers ("tools unavailable" / "no authorization receipt") without exposing secrets.
       controlContext: () => this.buildControlContext(profile.defaultTools),
+      // Bounded, redacted API-surface inventory parsed from ingested OpenAPI documents, so agents
+      // stop claiming they "lack the path inventory" after a spec was fetched/ingested.
+      surfaceContext: () => buildSurfaceContext(this.getActiveSurfaceModel()),
     });
     operator.attachArsenal(this.arsenal, agentLoop);
     // [Phase-2] Give the operator the shared board ONLY when swarm coordination is on — so the
@@ -1602,6 +1634,79 @@ export class TempestCommand extends EventEmitter<CommandEvents> {
     }
 
     return operator;
+  }
+
+  /**
+   * Ingest an OpenAPI/Swagger document discovered by a ScopeGuard-protected HTTP tool into the
+   * ACTIVE mission's surface model. Called by the pre-truncation sink with the complete body. Never
+   * throws (best-effort intelligence). `sourceOrigin` is the AUTHORIZED origin the document was
+   * fetched from — operations bind to it, NOT to the spec's declared servers.
+   */
+  private ingestSurfaceArtifact(sourceOrigin: string, body: string, contentType: string | undefined): void {
+    const mission = this.mission.getActiveMission();
+    if (!mission) return;
+    try {
+      const artifact = parseOpenApi(body, contentType);
+      if (!artifact.ok || !artifact.supported) return;
+      let model = this.surfaceModels.get(mission.id);
+      if (!model) {
+        model = new SurfaceModel(mission.id);
+        this.surfaceModels.set(mission.id, model);
+      }
+      model.ingestOpenApi(artifact, sourceOrigin);
+    } catch {
+      // Ingest failures must never disturb mission execution.
+    }
+  }
+
+  /** Live surface model for the active mission (if any). */
+  private getActiveSurfaceModel(): SurfaceModel | undefined {
+    const mission = this.mission.getActiveMission();
+    return mission ? this.surfaceModels.get(mission.id) : undefined;
+  }
+
+  /**
+   * Tear down a mission's mutable surface model. On clean completion (`keepSnapshot`) freeze it into
+   * an immutable, redacted terminal snapshot first; on abort/stop discard everything (never retain
+   * raw or derived spec state past an abort). Keeps only the most recent few terminal snapshots.
+   */
+  private finalizeSurface(missionId: string, keepSnapshot: boolean): void {
+    const model = this.surfaceModels.get(missionId);
+    if (!model) return;
+    if (keepSnapshot && model.size > 0) {
+      this.terminalSurfaceSnapshots.set(missionId, model.snapshot());
+      this.latestTerminalSurfaceMissionId = missionId;
+      // Bound retained terminal snapshots to avoid unbounded growth across missions.
+      while (this.terminalSurfaceSnapshots.size > 5) {
+        const oldest = this.terminalSurfaceSnapshots.keys().next().value;
+        if (oldest === undefined || oldest === this.latestTerminalSurfaceMissionId) break;
+        this.terminalSurfaceSnapshots.delete(oldest);
+      }
+    }
+    model.destroy();
+    this.surfaceModels.delete(missionId);
+  }
+
+  /**
+   * Read-only surface view for the inspection endpoints: the live model for an active mission, else
+   * the latest completed mission's terminal snapshot. Returns null when no surface exists.
+   */
+  public getSurfaceView(): {
+    source: 'live' | 'terminal';
+    missionId: string;
+    stats: SurfaceStats;
+    snapshot: SurfaceSnapshot;
+  } | null {
+    const active = this.getActiveSurfaceModel();
+    const activeMission = this.mission.getActiveMission();
+    if (active && activeMission && active.size > 0) {
+      return { source: 'live', missionId: activeMission.id, stats: active.stats(), snapshot: active.snapshot() };
+    }
+    if (this.latestTerminalSurfaceMissionId) {
+      const snap = this.terminalSurfaceSnapshots.get(this.latestTerminalSurfaceMissionId);
+      if (snap) return { source: 'terminal', missionId: this.latestTerminalSurfaceMissionId, stats: snap.stats, snapshot: snap };
+    }
+    return null;
   }
 
   /**

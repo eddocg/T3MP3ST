@@ -30,6 +30,7 @@ import type {
 import { ToolError, ToolErrorCategory } from '../types/index.js';
 import { validateToolArgs, buildJsonSchema, assertSchemaDepth } from '../validation/index.js';
 import { registerRuntimeSecrets, clearRuntimeSecrets } from '../redact.js';
+import { maybeIngestOpenApiArtifact, specMetaHint } from '../surface/context.js';
 import { parseToolOutput } from './parsers.js';
 
 const dnsResolve = promisify(dns.resolve);
@@ -1112,6 +1113,17 @@ export const BUILTIN_TOOLS: CustomTool[] = [
         }, authMode);
 
         const responseHeaders = Object.fromEntries(response.headers.entries());
+        // Pre-truncation OpenAPI ingest: when the agent explicitly fetches a spec URL (content-type
+        // or path hint), read the COMPLETE body once and hand it to the mission surface model. The
+        // body is otherwise not part of this tool's output, so it is read only when hinted.
+        if (specMetaHint(url, responseHeaders['content-type'])) {
+          try {
+            const bodyText = await response.clone().text();
+            maybeIngestOpenApiArtifact(url, responseHeaders['content-type'], bodyText);
+          } catch {
+            // Ingest is best-effort; never let it disturb the request result.
+          }
+        }
         return {
           success: true,
           output: `HTTP ${method} ${url}\nStatus: ${response.status} ${response.statusText}\nHeaders: ${JSON.stringify(responseHeaders, null, 2)}`,
@@ -2590,6 +2602,9 @@ ${issues.length ? `Issues:\n${issues.join('\n')}` : '✓ No obvious issues'}`,
               }, authMode);
               const contentType = resp.headers.get('content-type') || '';
               const bodyText = await resp.text();
+              // Pre-truncation OpenAPI ingest: this discovery tool probes /openapi.json, /swagger.json
+              // etc. — hand the COMPLETE body to the mission surface model before it is discarded.
+              maybeIngestOpenApiArtifact(fullUrl, contentType, bodyText);
               return {
                 path,
                 status: resp.status,

@@ -50,6 +50,13 @@ export interface AgentLoopOptions {
    * registered) and "no proof of authorization" (the control plane already gated execution).
    */
   controlContext?: () => ControlPlaneContext;
+  /**
+   * Surface-context provider — called at prompt-build time to inject a BOUNDED, already-redacted
+   * summary of the mission's Web/API surface parsed from ingested OpenAPI documents (path/method
+   * inventory, auth requirements). Returns null when no surface exists. Prevents agents from
+   * claiming they "lack the path inventory" after a spec was fetched and ingested.
+   */
+  surfaceContext?: () => string | null;
 }
 
 /**
@@ -157,7 +164,8 @@ export interface AgentEvents {
 export class AgentLoop extends EventEmitter<AgentEvents> {
   private llm: LLMBackbone;
   private arsenal: Arsenal;
-  private options: Required<Omit<AgentLoopOptions, 'controlContext'>> & Pick<AgentLoopOptions, 'controlContext'>;
+  private options: Required<Omit<AgentLoopOptions, 'controlContext' | 'surfaceContext'>> &
+    Pick<AgentLoopOptions, 'controlContext' | 'surfaceContext'>;
 
   constructor(llm: LLMBackbone, arsenal: Arsenal, options?: AgentLoopOptions) {
     super();
@@ -172,6 +180,7 @@ export class AgentLoop extends EventEmitter<AgentEvents> {
       maxToolOutputLength: options?.maxToolOutputLength ?? 4000,
       maxConcurrency: Math.max(1, options?.maxConcurrency ?? 5),
       controlContext: options?.controlContext,
+      surfaceContext: options?.surfaceContext,
     };
   }
 
@@ -565,6 +574,14 @@ export class AgentLoop extends EventEmitter<AgentEvents> {
       for (const c of control.constraints) {
         parts.push(`- **Constraint/ROE**: ${c}`);
       }
+    }
+
+    // API SURFACE — bounded, redacted path/method inventory parsed from ingested OpenAPI documents.
+    // Prevents the "Swagger truncated / I lack the path inventory" false blocker after a spec was
+    // fetched: the structured surface is available here even though the raw document is not dumped.
+    const surface = this.options.surfaceContext?.();
+    if (surface && surface.trim().length > 0) {
+      parts.push(`\n${surface}`);
     }
 
     // White-box source excerpt (security-prioritized) — provided by the large-repo

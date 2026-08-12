@@ -7346,6 +7346,52 @@ app.get('/api/mission/findings', (_req: Request, res: Response) => {
   }) as Record<string, unknown>);
 });
 
+/**
+ * Read-only Web/API surface inspection (P1A). Returns the live mission's SurfaceModel while a
+ * mission is active, else the latest completed mission's immutable terminal SurfaceSnapshot. The
+ * surface is already redacted at ingest; the extra redactSecrets pass is defense-in-depth. No raw
+ * OpenAPI document body is ever exposed here.
+ */
+app.get('/api/mission/surface', (_req: Request, res: Response) => {
+  const cmd = getTempestCommand();
+  const view = cmd?.getSurfaceView() ?? null;
+  if (!view) {
+    res.json({ surface: null });
+    return;
+  }
+  res.json(redactSecrets({
+    surface: {
+      source: view.source,
+      missionId: view.missionId,
+      stats: view.stats,
+      securitySchemes: view.snapshot.securitySchemes,
+      operations: view.snapshot.operations,
+      operationsTruncated: view.snapshot.operationsTruncated,
+      capturedAt: view.snapshot.capturedAt,
+    },
+  }) as Record<string, unknown>);
+});
+
+/** Read-only OpenAPI-derived surface stats/schemes (a lighter slice of /api/mission/surface). */
+app.get('/api/mission/surface/openapi', (_req: Request, res: Response) => {
+  const cmd = getTempestCommand();
+  const view = cmd?.getSurfaceView() ?? null;
+  if (!view) {
+    res.json({ openapi: null });
+    return;
+  }
+  res.json(redactSecrets({
+    openapi: {
+      source: view.source,
+      missionId: view.missionId,
+      stats: view.stats,
+      securitySchemes: view.snapshot.securitySchemes,
+      // Declared servers are METADATA ONLY — surfaced for intelligence, never an authorized origin.
+      declaredServers: view.stats.declaredServers,
+    },
+  }) as Record<string, unknown>);
+});
+
 // =============================================================================
 // OP GENERAL — AUTONOMOUS OPERATION ORCHESTRATOR
 // =============================================================================
