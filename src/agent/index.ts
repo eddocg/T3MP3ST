@@ -42,6 +42,33 @@ export interface AgentLoopOptions {
   maxToolOutputLength?: number;
   /** Max concurrent tool executions per LLM response (default: 5) */
   maxConcurrency?: number;
+  /**
+   * Control-plane context provider — called at prompt-build time so the agent receives a SAFE,
+   * names-only/non-secret picture of what the control plane has already established: authorized
+   * origins, mission-execution authorization state, ROE constraints, and the registered tool
+   * names for this session. Prevents two false blockers: "tools are unavailable" (they are
+   * registered) and "no proof of authorization" (the control plane already gated execution).
+   */
+  controlContext?: () => ControlPlaneContext;
+}
+
+/**
+ * Safe, NON-SECRET control-plane facts an agent may reason about. Names/state only — never
+ * receipt internals, credential values, or approval details.
+ */
+export interface ControlPlaneContext {
+  /** Exact authorized target origin(s) for this mission (e.g. https://api.example). */
+  authorizedOrigins: string[];
+  /**
+   * Whether the control plane has authorized mission execution (the task was dispatched through
+   * the execution gate). TRUE means the agent must NOT block waiting for external proof of
+   * authorization — the receipt is held by the control plane.
+   */
+  missionAuthorized: boolean;
+  /** Names-only operator constraints / ROE notes (e.g. full-range sweep authorization state). */
+  constraints: string[];
+  /** Tool names registered and callable for THIS session. */
+  toolNames: string[];
 }
 
 // =============================================================================
@@ -130,7 +157,7 @@ export interface AgentEvents {
 export class AgentLoop extends EventEmitter<AgentEvents> {
   private llm: LLMBackbone;
   private arsenal: Arsenal;
-  private options: Required<AgentLoopOptions>;
+  private options: Required<Omit<AgentLoopOptions, 'controlContext'>> & Pick<AgentLoopOptions, 'controlContext'>;
 
   constructor(llm: LLMBackbone, arsenal: Arsenal, options?: AgentLoopOptions) {
     super();
@@ -144,6 +171,7 @@ export class AgentLoop extends EventEmitter<AgentEvents> {
       verboseToolOutput: options?.verboseToolOutput ?? true,
       maxToolOutputLength: options?.maxToolOutputLength ?? 4000,
       maxConcurrency: Math.max(1, options?.maxConcurrency ?? 5),
+      controlContext: options?.controlContext,
     };
   }
 
@@ -516,6 +544,28 @@ export class AgentLoop extends EventEmitter<AgentEvents> {
     parts.push(`**Phase**: ${task.phase} | **Priority**: ${task.priority}/10`);
     parts.push(`\n### Objective`);
     parts.push(task.description);
+
+    // CONTROL-PLANE CONTEXT — authoritative, names-only, non-secret. Kills two false blockers:
+    // "tools are unavailable in this session" (they are registered — listed below) and "no
+    // verifiable scope/authorization receipt" (the control plane gated execution before dispatch).
+    const control = this.options.controlContext?.();
+    if (control) {
+      parts.push(`\n### Control-Plane Context (authoritative — do not contradict it)`);
+      if (control.authorizedOrigins.length) {
+        parts.push(`- **Authorized target origin(s)**: ${control.authorizedOrigins.join(', ')} — stay exactly within these.`);
+      }
+      if (control.missionAuthorized) {
+        parts.push(`- **Mission execution: AUTHORIZED.** This task was dispatched by the T3MP3ST control plane after its execution/scope gate passed. The scope/authorization receipt is held by the control plane — you do NOT need any further proof of authorization, and you must NOT block or refuse work for lack of one.`);
+      } else {
+        parts.push(`- **Mission execution: NOT confirmed authorized.** If the work requires authorization you cannot verify, blocking is valid — say so via outcome "blocked".`);
+      }
+      if (control.toolNames.length) {
+        parts.push(`- **Registered tools for THIS session (${control.toolNames.length})**: ${control.toolNames.join(', ')}. These ARE available via function calling — never claim a listed tool is unavailable. If a call fails, report the actual error; only a tool NOT in this list is unavailable.`);
+      }
+      for (const c of control.constraints) {
+        parts.push(`- **Constraint/ROE**: ${c}`);
+      }
+    }
 
     // White-box source excerpt (security-prioritized) — provided by the large-repo
     // analysis pipeline. Optional + backward-compatible: absent/empty keeps the

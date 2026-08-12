@@ -14,7 +14,7 @@ import type {
   Vulnerability,
 } from '../types/index.js';
 import { gateLiveFinding } from './gate.js';
-import { findingFingerprint, assessClaimSupport, auditedSeverity } from './classification.js';
+import { findingFingerprint, assessClaimSupport, auditedSeverity, synthesisProfile, synthesisMatches } from './classification.js';
 
 // =============================================================================
 // CREDENTIAL REDACTION — secrets NEVER leave the process in an API/LLM output
@@ -140,6 +140,31 @@ export class EvidenceVault extends EventEmitter<EvidenceVaultEvents> {
       return cloneFinding(existing);
     }
 
+    // SYNTHESIS CANONICALIZATION — a candidate with NO tool-grade evidence (LLM-synthesized,
+    // provenance model/none) must resolve onto an existing canonical observation of the same
+    // category + origin + boundary/capability instead of minting a second authoritative row.
+    // Genuine new hypotheses (no match) are still stored — but they stay labeled observations
+    // (claimSupport unverifiable, gate-unpassed) and never masquerade as evidence-backed.
+    if ((finding.evidence?.length ?? 0) === 0) {
+      const match = this.findSynthesisMatch(finding);
+      if (match) {
+        // Preserve the source prose as an audit note on the canonical record (bounded).
+        const note = `also reported as: "${String(finding.title ?? '').slice(0, 160)}"`;
+        if (finding.title && !match.description?.includes(note)) {
+          match.description = `${match.description ?? ''} [${note}]`.slice(0, 4000);
+        }
+        const order: Severity[] = ['info', 'low', 'medium', 'high', 'critical'];
+        const incomingAsserted = finding.assertedSeverity ?? finding.severity;
+        const priorAsserted = match.assertedSeverity ?? match.severity;
+        match.assertedSeverity = order.indexOf(incomingAsserted) > order.indexOf(priorAsserted) ? incomingAsserted : priorAsserted;
+        match.claimSupport = assessClaimSupport(match);
+        match.severity = auditedSeverity(match);
+        this.consolidatedCount++;
+        this.emit('finding:updated', cloneFinding(match));
+        return cloneFinding(match);
+      }
+    }
+
     const stored = cloneFinding(finding);
     // Attach the audited support verdict and make severity EFFECTIVE at the boundary: the asserted
     // claim is preserved in assertedSeverity; severity is clamped to what the evidence supports.
@@ -156,6 +181,20 @@ export class EvidenceVault extends EventEmitter<EvidenceVaultEvents> {
   /** Number of findings merged into an existing same-fingerprint record (dedup telemetry). */
   get consolidatedFindings(): number {
     return this.consolidatedCount;
+  }
+
+  /**
+   * Find the canonical finding a no-evidence SYNTHESIS describes: same target, same derived
+   * category, same boundary (exact route / selector / root), with title-token overlap only as
+   * the tie-breaker for coarse categories. Never wording-alone; never cross-target.
+   */
+  private findSynthesisMatch(finding: Finding): Finding | undefined {
+    const incoming = synthesisProfile(finding);
+    for (const existing of this.findings.values()) {
+      if (existing.targetId !== finding.targetId) continue;
+      if (synthesisMatches(incoming, synthesisProfile(existing))) return existing;
+    }
+    return undefined;
   }
 
   /**

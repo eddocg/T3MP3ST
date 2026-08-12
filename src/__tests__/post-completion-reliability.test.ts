@@ -945,3 +945,369 @@ describe('P4 — authMode public contract', () => {
     expect(uiSource).toContain('reportRows');
   });
 });
+
+// ═════════════════ FINAL RUNTIME TRUTH CLOSURE — P1..P4 ═════════════════
+
+describe('FINAL CLOSURE P1 — control-plane capability + authorization context reaches agents', () => {
+  async function liveCommand() {
+    const mod = await import('../index.js');
+    const command = new mod.TempestCommand({ name: 'Context Op', llm: { provider: 'mock', model: 'mock-model' } }) as any;
+    command.targetEnv.addTarget({
+      id: 'target-1', name: 'api', type: 'api', zone: 'external', status: 'identified',
+      address: TARGET, discoveredAt: Date.now(),
+    });
+    const mission = command.mission.createMission({
+      name: 'Context Op', objectives: ['broad coverage'], objectiveClass: 'general', missionFamily: 'web_api',
+    });
+    command.mission.startMission(mission.id);
+    return { command, mission };
+  }
+
+  it('agent prompt carries authorized origins, AUTHORIZED execution state, ROE, and the registered tool names', async () => {
+    const { command } = await liveCommand();
+    const { createAgentLoop } = await import('../agent/index.js');
+    const { ARCHETYPE_PROFILES } = await import('../operators/index.js');
+    const profile = ARCHETYPE_PROFILES['scanner'];
+    const ctx = (command as any).buildControlContext(profile.defaultTools);
+
+    // Names-only, non-secret shape.
+    expect(ctx.missionAuthorized).toBe(true); // active mission = execution gate passed
+    expect(ctx.authorizedOrigins).toContain(TARGET);
+    expect(ctx.toolNames).toEqual(profile.defaultTools);
+    expect(ctx.toolNames.length).toBeGreaterThan(0);
+    expect(ctx.constraints.join(' ')).toContain('ScopeGuard');
+    expect(JSON.stringify(ctx)).not.toMatch(/bearer|password|token|secret/i);
+
+    // The prompt an agent actually receives — the false "tools unavailable" blocker cannot be
+    // truthfully claimed: every registered tool is named as AVAILABLE.
+    let seenPrompt = '';
+    const llm = {
+      getProvider: () => 'mock',
+      chat: vi.fn().mockImplementation(async (messages: Array<{ role: string; content: string }>) => {
+        seenPrompt = messages.map((m) => m.content).join('\n');
+        return { content: 'done\n```json\n{"findings":[],"outcome":"no_eligible_work"}\n```', toolCalls: [] };
+      }),
+      chatWithTools: vi.fn().mockImplementation(async (messages: Array<{ role: string; content: string }>) => {
+        seenPrompt = messages.map((m) => m.content).join('\n');
+        return { content: 'done\n```json\n{"findings":[],"outcome":"no_eligible_work"}\n```', toolCalls: [] };
+      }),
+    } as unknown as LLMBackbone;
+    const agent = createAgentLoop(llm, command.arsenal, {
+      maxIterations: 2,
+      tools: profile.defaultTools,
+      controlContext: () => ctx,
+    });
+    await agent.run(makeTask({ name: 'Automated Vulnerability Scan' }), 'Execute.');
+
+    expect(seenPrompt).toContain('Control-Plane Context');
+    expect(seenPrompt).toContain('Mission execution: AUTHORIZED');
+    expect(seenPrompt).toContain('must NOT block or refuse work for lack of one');
+    expect(seenPrompt).toContain(`Authorized target origin(s)**: ${TARGET}`);
+    expect(seenPrompt).toContain('Registered tools for THIS session');
+    expect(seenPrompt).toContain('never claim a listed tool is unavailable');
+    // The scanner toolkit (incl. nuclei_scan) is named as registered — the exact false blocker
+    // from the integration run ("nuclei_scan and other Arsenal functions are unavailable").
+    if (profile.defaultTools.includes('nuclei_scan')) {
+      expect(seenPrompt).toContain('nuclei_scan');
+    }
+    command.stop();
+  });
+
+  it('spawned operators receive the control-context provider wired to the live command', async () => {
+    const { command } = await liveCommand();
+    // Swap the backbone BEFORE spawning so the operator's agent loop is built on the capture mock.
+    let seenPrompt = '';
+    const capturing = {
+      getProvider: () => 'mock',
+      chat: vi.fn().mockImplementation(async (messages: Array<{ role: string; content: string }>) => {
+        seenPrompt = messages.map((m) => m.content).join('\n');
+        return { content: 'done\n```json\n{"findings":[],"outcome":"no_eligible_work"}\n```', toolCalls: [] };
+      }),
+      chatWithTools: vi.fn().mockImplementation(async (messages: Array<{ role: string; content: string }>) => {
+        seenPrompt = messages.map((m) => m.content).join('\n');
+        return { content: 'done\n```json\n{"findings":[],"outcome":"no_eligible_work"}\n```', toolCalls: [] };
+      }),
+    } as unknown as LLMBackbone;
+    (command as any).llm = capturing;
+    const op = command.spawnOperator('Scanner-G2', 'scanner');
+    await op.executeTask(makeTask({ name: 'Exploit Confirmed Vulnerabilities', missionId: (command.mission.getActiveMission() as any).id }));
+    expect(seenPrompt).toContain('Mission execution: AUTHORIZED');
+    expect(seenPrompt).toContain('Registered tools for THIS session');
+    command.stop();
+  });
+
+  it('without an active mission the context honestly reports NOT-authorized (blocking stays valid)', async () => {
+    const mod = await import('../index.js');
+    const command = new mod.TempestCommand({ name: 'Idle Op', llm: { provider: 'mock', model: 'mock-model' } }) as any;
+    const ctx = (command as any).buildControlContext(['curl_request']);
+    expect(ctx.missionAuthorized).toBe(false);
+    command.stop();
+  });
+});
+
+describe('FINAL CLOSURE P2 — partial is first-class in status / snapshot / report / UI', () => {
+  async function partialCommand() {
+    const mod = await import('../index.js');
+    const command = new mod.TempestCommand({ name: 'Partial Op', llm: { provider: 'mock', model: 'mock-model' } }) as any;
+    command.targetEnv.addTarget({
+      id: 'target-1', name: 'api', type: 'api', zone: 'external', status: 'identified',
+      address: TARGET, discoveredAt: Date.now(),
+    });
+    const mission = command.mission.createMission({
+      name: 'Partial Op', objectives: ['broad coverage'], objectiveClass: 'general', missionFamily: 'web_api',
+    });
+    command.mission.startMission(mission.id);
+    const tq = command.mission.getTaskQueue();
+    const partial = makeTask({
+      missionId: mission.id, name: 'Web Application Security Testing', status: 'pending',
+    });
+    const done = makeTask({ missionId: mission.id, name: 'Recon', status: 'pending' });
+    tq.add(partial);
+    tq.add(done);
+    tq.complete(partial.id, {
+      success: true, output: 'executed battery',
+      disposition: 'partial', dispositionReason: 'authenticated differential unverified',
+    });
+    tq.complete(done.id, { success: true, output: 'done', disposition: 'completed' });
+    return { command, mission };
+  }
+
+  it('status API serializes the structured disposition on the task result', async () => {
+    const { command } = await partialCommand();
+    const status = command.getStatus();
+    const row = status.tasks.find((t: any) => t.name === 'Web Application Security Testing');
+    expect(row).toBeTruthy();
+    expect(row.status).toBe('completed'); // execution state
+    expect(row.result.disposition).toBe('partial'); // coverage state — distinct
+    expect(row.result.dispositionReason).toContain('unverified');
+    command.stop();
+  });
+
+  it('terminal snapshot taskSummary counts partial separately from completed and blocked', async () => {
+    const { command } = await partialCommand();
+    command.mission.completeMission(command.mission.getActiveMission()!.id);
+    const status = command.getStatus();
+    expect(status.terminalMission).toBeTruthy();
+    expect(status.terminalMission!.taskSummary.completed).toBe(2);
+    expect(status.terminalMission!.taskSummary.partial).toBe(1);
+    expect(status.terminalMission!.taskSummary.blocked).toBe(0); // partial ≠ blocked
+    command.stop();
+  });
+
+  it('report preamble distinguishes partial coverage', async () => {
+    const { command } = await partialCommand();
+    command.mission.completeMission(command.mission.getActiveMission()!.id);
+    const report = command.generateReport();
+    expect(report).toContain('2 completed (1 partial coverage)');
+    command.stop();
+  });
+
+  it('UI: completed+partial renders a PARTIAL badge with "Executed · incomplete coverage", never blocked', () => {
+    const uiSource = readFileSync(join(__dirname, '..', '..', 'docs', 'index.html'), 'utf8');
+    expect(uiSource).toContain("task.result?.disposition === 'partial'");
+    expect(uiSource).toContain("isPartial ? 'PARTIAL'");
+    expect(uiSource).toContain('Executed · incomplete coverage');
+    expect(uiSource).toContain('partial coverage');
+  });
+});
+
+describe('FINAL CLOSURE P3 — synthesized candidates canonicalize before final storage', () => {
+  async function liveCommand() {
+    const mod = await import('../index.js');
+    const command = new mod.TempestCommand({ name: 'Synth Op', llm: { provider: 'mock', model: 'mock-model' } }) as any;
+    command.targetEnv.addTarget({
+      id: 'target-1', name: 'api', type: 'api', zone: 'external', status: 'identified',
+      address: TARGET, discoveredAt: Date.now(),
+    });
+    const mission = command.mission.createMission({
+      name: 'Synth Op', objectives: ['broad coverage'], objectiveClass: 'general', missionFamily: 'web_api',
+    });
+    command.mission.startMission(mission.id);
+    const targetId = command.targetEnv.getAllTargets()[0].id;
+    return { command, mission, targetId };
+  }
+
+  const synth = (targetId: string, title: string, severity: Finding['severity'] = 'medium'): Finding => makeFinding({
+    title,
+    description: `${title} — model synthesis`,
+    severity,
+    targetId,
+    evidence: [], // NO tool-grade evidence — provenance-none synthesis
+  });
+
+  const toolCors = (targetId: string, route: string): Finding => makeFinding({
+    title: route === '/' ? 'CORS Misconfiguration' : `CORS Misconfiguration on ${route}`,
+    targetId, category: 'cors', severity: 'high',
+    evidence: [{
+      type: 'response',
+      content: `GET https://api.example.test${route} 200\naccess-control-allow-origin: https://attacker.example\naccess-control-allow-credentials: true`,
+      timestamp: Date.now(), metadata: { tool: 'cors_check' },
+    }],
+  });
+
+  it('A: tool-backed CORS on / + synthesis explicitly describing / → merges into the root candidate', async () => {
+    const { command, targetId } = await liveCommand();
+    const op = command.spawnOperator('Ghost-1', 'recon');
+    op.recordFinding(toolCors(targetId, '/'));
+    // Explicit root boundary in the synthesis (bare-origin URL) — confidently resolved.
+    op.recordFinding(synth(targetId, 'Credentialed arbitrary-origin CORS reflection at https://api.example.test/', 'high'));
+    const all = command.vault.getAllFindings();
+    expect(all.length).toBe(1);
+    expect(all[0].description).toContain('also reported as');
+    command.stop();
+  });
+
+  it('B: tool-backed CORS on / + synthesis describing /oauth2/authorize → distinct candidate', async () => {
+    const { command, targetId } = await liveCommand();
+    const op = command.spawnOperator('Ghost-1', 'recon');
+    op.recordFinding(toolCors(targetId, '/'));
+    op.recordFinding(synth(targetId, 'Credentialed CORS reflection on /oauth2/authorize', 'high'));
+    const all = command.vault.getAllFindings();
+    expect(all.length).toBe(2); // different boundary — never merged into /
+    expect(all.some((f: Finding) => /oauth2\/authorize/.test(f.title))).toBe(true);
+    command.stop();
+  });
+
+  it('C: route-ambiguous CORS synthesis (no recoverable path) does NOT merge to / — stays an unverifiable candidate', async () => {
+    const { command, targetId } = await liveCommand();
+    const op = command.spawnOperator('Ghost-1', 'recon');
+    op.recordFinding(toolCors(targetId, '/'));
+    // Pure prose, no URL/path — the actual boundary cannot be resolved.
+    op.recordFinding(synth(targetId, 'Credentialed arbitrary-origin CORS reflection', 'high'));
+    const all = command.vault.getAllFindings();
+    expect(all.length).toBe(2); // NOT absorbed into the root candidate
+    const root = all.find((f: Finding) => f.title === 'CORS Misconfiguration')!;
+    expect(root.description).not.toContain('also reported as'); // root row unpolluted
+    const ambiguous = all.find((f: Finding) => f.title === 'Credentialed arbitrary-origin CORS reflection')!;
+    expect(ambiguous.evidence.length).toBe(0);
+    expect(ambiguous.claimSupport?.supportLevel).toBe('unverifiable'); // labeled, not evidence-backed
+    expect(ambiguous.verifyGate?.passed ?? false).toBe(false);
+    command.stop();
+  });
+
+  it('D: origin-wide category synthesis (TLS/DNS/version) consolidates at origin level', async () => {
+    const { command, targetId } = await liveCommand();
+    const op = command.spawnOperator('Ghost-1', 'recon');
+    // Tool-backed TLS posture (host:443 service-level) + route-less TLS synthesis → merge.
+    op.recordFinding(makeFinding({
+      title: 'Weak Cipher Suites Detection', targetId, category: 'tls', severity: 'medium',
+      evidence: [{
+        type: 'output', content: 'nuclei: weak-cipher-suites at https://api.example.test:443',
+        timestamp: Date.now(), metadata: { tool: 'nuclei' },
+      }],
+    }));
+    op.recordFinding(synth(targetId, 'Deprecated TLS cipher suites accepted by the service', 'low'));
+    // Tool-backed version exposure + route-less version synthesis → merge via version selector.
+    op.recordFinding(makeFinding({
+      title: 'Server Version Disclosed', targetId, category: 'info_disclosure', severity: 'low',
+      evidence: [{
+        type: 'response', content: 'HTTP/1.1 200 OK\nserver: nginx/1.24.0\nhttps://api.example.test/',
+        timestamp: Date.now(), metadata: { tool: 'http_request' },
+      }],
+    }));
+    op.recordFinding(synth(targetId, 'nginx version exposed in response banner', 'low'));
+    const all = command.vault.getAllFindings();
+    expect(all.length).toBe(2); // both syntheses consolidated at origin level
+    expect(all.find((f: Finding) => f.title === 'Weak Cipher Suites Detection')!.description).toContain('also reported as');
+    expect(all.find((f: Finding) => f.title === 'Server Version Disclosed')!.description).toContain('also reported as');
+    command.stop();
+  });
+
+  it('e2e (final-report path): explicit-root CORS synthesis merges; selector-resolved swagger syntheses merge; ambiguous CORS synthesis stays a separate candidate', async () => {
+    const { command, targetId } = await liveCommand();
+    const op = command.spawnOperator('Ghost-1', 'recon');
+
+    // Tool-backed canonical observations.
+    op.recordFinding(toolCors(targetId, '/'));
+    op.recordFinding(makeFinding({
+      title: 'API Documentation Exposed', targetId, category: 'info_disclosure', severity: 'medium',
+      evidence: [{
+        type: 'response',
+        content: 'GET https://api.example.test/swagger.json 200\n{"openapi":"3.0.0"}',
+        timestamp: Date.now(), metadata: { tool: 'http_request' },
+      }],
+    }));
+    op.recordFinding(toolCors(targetId, '/oauth2/authorize'));
+
+    // Later LLM syntheses — reworded, provenance-none, no evidence.
+    op.recordFinding(synth(targetId, 'Arbitrary Origin Reflected in Credentialed CORS Policy at https://api.example.test/', 'high')); // explicit / → merges
+    op.recordFinding(synth(targetId, 'Credentialed arbitrary-origin CORS reflection', 'high')); // ambiguous → stays
+    op.recordFinding(synth(targetId, 'Public OpenAPI specification exposed', 'low')); // api-docs selector → merges
+    op.recordFinding(synth(targetId, 'Swagger API documentation publicly accessible', 'low')); // api-docs selector → merges
+
+    const all = command.vault.getAllFindings();
+    // 3 tool-backed + 1 ambiguous CORS candidate = 4 — NOT 7, and NOT 3 (ambiguous must not merge).
+    expect(all.length).toBe(4);
+    const corsRoot = all.find((f: Finding) => f.title === 'CORS Misconfiguration')!;
+    expect(corsRoot.description).toContain('also reported as'); // explicit-root synthesis attached
+    const swagger = all.find((f: Finding) => f.title === 'API Documentation Exposed')!;
+    expect(swagger.description).toContain('also reported as'); // both swagger syntheses attached
+    // The distinct tool-backed boundary was never merged into the root CORS row.
+    expect(all.some((f: Finding) => f.title === 'CORS Misconfiguration on /oauth2/authorize')).toBe(true);
+    // The route-ambiguous synthesis survived as its own unverifiable candidate.
+    const ambiguous = all.find((f: Finding) => f.title === 'Credentialed arbitrary-origin CORS reflection')!;
+    expect(ambiguous.claimSupport?.supportLevel).toBe('unverifiable');
+
+    // Final report: exactly 4 finding rows.
+    command.mission.completeMission(command.mission.getActiveMission()!.id);
+    const report = command.generateReport();
+    expect(report.match(/\*\*Severity:\*\*/g)!.length).toBe(4);
+    command.stop();
+  });
+
+  it('a genuinely NEW no-evidence hypothesis is stored as a labeled candidate, not silently merged', async () => {
+    const { command, targetId } = await liveCommand();
+    const op = command.spawnOperator('Ghost-1', 'recon');
+    op.recordFinding(synth(targetId, 'Public DNS TXT record discloses staging deployment metadata', 'low'));
+    op.recordFinding(synth(targetId, 'Public DNS record discloses staging deployment metadata', 'low'));
+    op.recordFinding(synth(targetId, 'Server version disclosed in response banner', 'low'));
+
+    const all = command.vault.getAllFindings();
+    // The two reworded DNS syntheses consolidate (dns selector); the unrelated version observation stays distinct.
+    expect(all.length).toBe(2);
+    const dns = all.find((f: Finding) => /DNS/.test(f.title))!;
+    // Labeled as an observation — never masquerading as evidence-backed.
+    expect(dns.evidence.length).toBe(0);
+    expect(dns.claimSupport?.supportLevel).toBe('unverifiable');
+    expect(dns.verifyGate?.passed ?? false).toBe(false);
+    command.stop();
+  });
+});
+
+describe('FINAL CLOSURE P4 — SITREP uses canonical counts, labels telemetry', () => {
+  it('SITREP payload presents canonicalFindings as authoritative and raw counts as telemetry', async () => {
+    const mod = await import('../index.js');
+    const command = new mod.TempestCommand({ name: 'Sitrep Op', llm: { provider: 'mock', model: 'mock-model' } }) as any;
+    command.targetEnv.addTarget({
+      id: 'target-1', name: 'api', type: 'api', zone: 'external', status: 'identified',
+      address: TARGET, discoveredAt: Date.now(),
+    });
+    const mission = command.mission.createMission({
+      name: 'Sitrep Op', objectives: ['broad coverage'], objectiveClass: 'general', missionFamily: 'web_api',
+    });
+    command.mission.startMission(mission.id);
+    command.vault.addFinding(makeFinding({ title: 'CORS Misconfiguration', category: 'cors', severity: 'high' }));
+
+    let captured = '';
+    const llm = {
+      prompt: async (p: string) => {
+        captured = p;
+        return '```json\n{"assessment":"ok","findingsSummary":"1 canonical candidate","needsAdaptation":false,"adaptation":null,"confidence":80,"nextActions":["continue"]}\n```';
+      },
+    } as unknown as LLMBackbone;
+    const general = new OpGeneral(llm);
+    await general.produceSitrep(command);
+
+    // Canonical block present with the vault totals…
+    expect(captured).toContain('"canonicalFindings"');
+    expect(captured).toContain('"total": 1');
+    expect(captured).toContain('"verified": 0');
+    // …raw operator counts present but explicitly labeled telemetry…
+    expect(captured).toContain('"rawOperatorObservations"');
+    expect(captured).toContain('telemetry only, NOT a findings total');
+    // …and the LLM is instructed never to present competing "findings" totals.
+    expect(captured).toContain('ONLY authoritative finding total');
+    expect(captured).toContain('NEVER call them "findings"');
+    command.stop();
+  });
+});

@@ -1426,6 +1426,21 @@ Return only a valid JSON object wrapped in a json code block. Keep it compact, c
         tasksCompleted: op.completedTasks,
         findings: op.findings,
       })),
+      // CANONICAL COUNTS — the EvidenceVault is the ONLY authoritative finding store. These are
+      // the totals SITREP must use for security conclusions. Raw operator-reported counts and
+      // per-target scanner signals are TELEMETRY, not findings, and must never be presented as
+      // competing "findings" totals.
+      canonicalFindings: {
+        total: findings.length,
+        critical: findings.filter(f => f.severity === 'critical').length,
+        high: findings.filter(f => f.severity === 'high').length,
+        verified: findings.filter(f => f.verifyGate?.passed === true).length,
+        consolidatedObservations: command.vault.consolidatedFindings,
+      },
+      telemetry: {
+        rawOperatorObservations: operators.reduce((n, op) => n + (op.findings ?? 0), 0),
+        note: 'raw operator-reported observation count BEFORE canonical dedup — telemetry only, NOT a findings total',
+      },
       findingsCount: findings.length,
       criticalFindings: findings.filter(f => f.severity === 'critical').length,
       highFindings: findings.filter(f => f.severity === 'high').length,
@@ -1440,7 +1455,9 @@ Return only a valid JSON object wrapped in a json code block. Keep it compact, c
 
     try {
       const response = await this.llm.prompt(
-        `## SITUATION REPORT REQUEST\n\nCurrent operation state:\n\`\`\`json\n${JSON.stringify(situationData, null, 2)}\n\`\`\`\n\nIMPORTANT — honest language: work-order receipt/readiness counts are ADVISORY evidence-maturity signals, not hard gates. The runtime advances phases and completes the mission based on task completion, NOT on receipt/readiness. Do NOT claim the board is "blocked from closure" or that phases "cannot advance" because of missing receipts — describe them as evidence-maturity guidance (e.g. "N of M work orders still need corroborating receipts before their findings are report-ready"). Distinguish scanner observations from verified, demonstrated impact.${missionTerminal ? '\n\nTERMINAL MISSION: this mission has COMPLETED (see missionStatus.status/objectiveOutcome/completionReason). Report it as a completed operation with its final outcome — do NOT describe it as "behind schedule", "phase unknown", or "inactive" as if it were still running.' : ''}\n\nProduce a brief SITREP as JSON with this schema:\n\`\`\`\n{"assessment":"string","findingsSummary":"string","needsAdaptation":boolean,"adaptation":"string or null","confidence":number_0_to_100,"nextActions":["string"]}\n\`\`\`\n\nRespond with ONLY valid JSON in a code block.`,
+        `## SITUATION REPORT REQUEST\n\nCurrent operation state:\n\`\`\`json\n${JSON.stringify(situationData, null, 2)}\n\`\`\`\n\nIMPORTANT — honest language: work-order receipt/readiness counts are ADVISORY evidence-maturity signals, not hard gates. The runtime advances phases and completes the mission based on task completion, NOT on receipt/readiness. Do NOT claim the board is "blocked from closure" or that phases "cannot advance" because of missing receipts — describe them as evidence-maturity guidance (e.g. "N of M work orders still need corroborating receipts before their findings are report-ready"). Distinguish scanner observations from verified, demonstrated impact.
+
+CANONICAL COUNTS RULE: \`canonicalFindings\` (EvidenceVault) is the ONLY authoritative finding total — use it for every security conclusion. \`telemetry.rawOperatorObservations\` and per-target vulnerability signals are pre-dedup telemetry: NEVER call them "findings", never present them as competing totals, and never ask for "reconciliation" between them and the canonical count. If you cite them, label them exactly as "raw observations (telemetry)". If useful, report the three tiers separately: raw observations N · canonical candidates N · verified findings N.${missionTerminal ? '\n\nTERMINAL MISSION: this mission has COMPLETED (see missionStatus.status/objectiveOutcome/completionReason). Report it as a completed operation with its final outcome — do NOT describe it as "behind schedule", "phase unknown", or "inactive" as if it were still running.' : ''}\n\nProduce a brief SITREP as JSON with this schema:\n\`\`\`\n{"assessment":"string","findingsSummary":"string","needsAdaptation":boolean,"adaptation":"string or null","confidence":number_0_to_100,"nextActions":["string"]}\n\`\`\`\n\nRespond with ONLY valid JSON in a code block.`,
         GENERAL_REPLAN_PROMPT,
         { maxTokens: 2048, temperature: 0.3 }
       );

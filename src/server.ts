@@ -436,6 +436,8 @@ function recordTerminalMissionSnapshot(mission: Mission, status: 'completed' | '
     taskSummary: {
       total: tasks.length,
       completed: count('completed'),
+      // Coverage truth: executed-but-incomplete tasks, distinct from completed and blocked.
+      partial: tasks.filter((t) => t.status === 'completed' && t.result?.disposition === 'partial').length,
       failed: count('failed'),
       skipped: count('skipped'),
       blocked: count('blocked'),
@@ -1024,7 +1026,7 @@ interface TerminalMissionSnapshot {
   startedAt?: number;
   completedAt?: number;
   phaseDispositions: Array<{ phase: string; disposition: string; total: number; completed: number; failed: number; blocked: number; skipped: number }>;
-  taskSummary: { total: number; completed: number; failed: number; skipped: number; blocked: number; retried: number };
+  taskSummary: { total: number; completed: number; partial: number; failed: number; skipped: number; blocked: number; retried: number };
   blockedPrerequisites: Array<{ id: string; name: string; reason: string }>;
   completedPrerequisites: Array<{ id: string; name: string }>;
   /**

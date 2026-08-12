@@ -1585,6 +1585,10 @@ export class TempestCommand extends EventEmitter<CommandEvents> {
       maxTokens: 50000,
       toolCategories: profile.toolCategories,
       tools: profile.defaultTools,
+      // Safe names-only control-plane context: authorized origins, execution-authorized state,
+      // ROE constraints, and the registered tool names for this session. Kills the two false
+      // blockers ("tools unavailable" / "no authorization receipt") without exposing secrets.
+      controlContext: () => this.buildControlContext(profile.defaultTools),
     });
     operator.attachArsenal(this.arsenal, agentLoop);
     // [Phase-2] Give the operator the shared board ONLY when swarm coordination is on — so the
@@ -1598,6 +1602,41 @@ export class TempestCommand extends EventEmitter<CommandEvents> {
     }
 
     return operator;
+  }
+
+  /**
+   * Build the SAFE, names-only control-plane context handed to every agent prompt. Never
+   * includes receipt internals, credential values, or approval details — only facts the agent
+   * needs to stop inventing false blockers: what is authorized, that execution was gated, the
+   * ROE constraints, and which tools are actually registered for its session.
+   */
+  private buildControlContext(sessionTools?: string[]): import('./agent/index.js').ControlPlaneContext {
+    const mission = this.mission.getActiveMission();
+    // Exact authorized origins from the target environment (origin-normalized where possible).
+    const origins = [...new Set(
+      this.targetEnv.getAllTargets()
+        .map((t) => {
+          try { return new URL(t.address).origin; } catch { return t.address; }
+        })
+        .filter(Boolean),
+    )];
+    const constraints: string[] = [
+      'ScopeGuard is enforced by the control plane — out-of-scope hosts are blocked at the tool layer; do not attempt them.',
+      mission?.allowFullRangeScans
+        ? 'Full-range (1-65535) port sweeps ARE authorized for this mission (explicit pacing/ROE grant).'
+        : 'Full-range (1-65535) port sweeps are NOT authorized by default — stay within top-1000 unless the mission explicitly grants it.',
+    ];
+    if (mission?.objectiveClass === 'authorization_lifecycle') {
+      constraints.push('Objective lane: authorization_lifecycle — bounded prerequisite/baseline work only; cross-principal differentials require fixtures the control plane will name when absent.');
+    }
+    return {
+      authorizedOrigins: origins,
+      // Dispatch through the execution gate IS the authorization signal: an active mission means
+      // the control plane authorized this run. Agents must not demand a second external proof.
+      missionAuthorized: !!mission,
+      constraints,
+      toolNames: sessionTools?.length ? [...sessionTools] : this.arsenal.getToolDefinitions().map((t) => t.name),
+    };
   }
 
   /**
@@ -1670,7 +1709,7 @@ export class TempestCommand extends EventEmitter<CommandEvents> {
       startedAt?: number;
       completedAt?: number;
       phaseDispositions: Array<{ phase: string; disposition: string; total: number; completed: number; failed: number; blocked: number; skipped: number }>;
-      taskSummary: { total: number; completed: number; failed: number; skipped: number; blocked: number; retried: number };
+      taskSummary: { total: number; completed: number; partial: number; failed: number; skipped: number; blocked: number; retried: number };
       blockedPrerequisites: Array<{ id: string; name: string; reason: string }>;
       completedPrerequisites: Array<{ id: string; name: string }>;
     } | null;
@@ -1727,6 +1766,9 @@ export class TempestCommand extends EventEmitter<CommandEvents> {
         taskSummary: {
           total: missionTasks.length,
           completed: count('completed'),
+          // Coverage truth: tasks that EXECUTED but declared partial coverage — counted
+          // separately from both fully-completed and blocked work.
+          partial: missionTasks.filter((t) => t.status === 'completed' && t.result?.disposition === 'partial').length,
           failed: count('failed'),
           skipped: count('skipped'),
           blocked: count('blocked'),
@@ -1769,6 +1811,11 @@ export class TempestCommand extends EventEmitter<CommandEvents> {
               output: task.result.output,
               error: task.result.error,
               findings: task.result.findings,
+              // Structured coverage truth: 'completed' status with disposition 'partial' means
+              // the work EXECUTED but a required sub-objective stayed unverified — consumers
+              // must render PARTIAL, not a plain COMPLETED badge.
+              disposition: task.result.disposition,
+              dispositionReason: task.result.dispositionReason,
             } : undefined,
           })),
     };
@@ -1813,7 +1860,8 @@ export class TempestCommand extends EventEmitter<CommandEvents> {
     lines.push(`**Objective class:** ${mission.objectiveClass ?? 'general'}`);
     if (mission.objectiveOutcome) lines.push(`**Objective outcome:** ${mission.objectiveOutcome}`);
     if (mission.completionReason) lines.push(`**Completion reason:** ${mission.completionReason}`);
-    lines.push(`**Tasks:** ${tasks.length} total — ${count('completed')} completed, ${count('failed')} failed, ${count('skipped')} skipped, ${count('blocked')} blocked`);
+    const partialCount = tasks.filter((t) => t.status === 'completed' && t.result?.disposition === 'partial').length;
+    lines.push(`**Tasks:** ${tasks.length} total — ${count('completed')} completed (${partialCount} partial coverage), ${count('failed')} failed, ${count('skipped')} skipped, ${count('blocked')} blocked`);
     if (mission.phaseDispositions?.length) {
       lines.push('');
       lines.push('**Phase dispositions:**');

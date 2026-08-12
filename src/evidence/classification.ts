@@ -339,3 +339,115 @@ export function findingFingerprint(f: {
   }
   return parts.join('::');
 }
+
+// =============================================================================
+// SYNTHESIS CANONICALIZATION (no-evidence LLM candidates)
+// =============================================================================
+
+/**
+ * Boundary SELECTORS for synthesized prose — a coarse capability/artifact identity derivable
+ * from titles/details when no tool evidence exists. Lets a reworded "Public OpenAPI spec
+ * exposed" synthesis resolve to the tool-backed /swagger.json observation (same selector)
+ * while "DNS TXT metadata" and "server version banner" stay distinct.
+ */
+const SYNTH_SELECTORS: Array<[RegExp, string]> = [
+  [/swagger|openapi|api[- ]docs|api documentation/, 'api-docs'],
+  [/\bdns\b|txt record|nameserver|\bmx record/, 'dns'],
+  [/version|banner|server header/, 'version'],
+];
+
+const SYNTH_STOP = new Set(['the', 'and', 'for', 'with', 'via', 'from', 'that', 'this', 'are', 'was', 'were', 'has', 'have', 'not', 'but', 'all', 'can', 'its', 'our', 'their', 'public', 'record', 'policy', 'exposed', 'discloses']);
+
+export interface SynthesisProfile {
+  category: string;
+  /** Explicit route if one is visible (URL or absolute path in title/evidence); '/' for bare-origin; null when unknown. */
+  route: string | null;
+  selector: string;
+  tokens: Set<string>;
+}
+
+/**
+ * Profile a finding for SYNTHESIS matching — used only for candidates with no tool-grade
+ * evidence, where the exact fingerprint has no boundary to key on. Never wording-alone: the
+ * match key is category + target + boundary(route/selector); title tokens are only the
+ * tie-breaker for coarse categories.
+ */
+export function synthesisProfile(f: {
+  targetId?: string;
+  title?: string;
+  category?: string;
+  cwe?: string[];
+  evidence?: Evidence[];
+}): SynthesisProfile {
+  const category = deriveCategory(f);
+  const text = `${f.title ?? ''}\n${(f.evidence ?? []).map((e) => String(e?.content ?? '')).join('\n')}`;
+  let route: string | null = null;
+  for (const m of text.matchAll(/https?:\/\/[^\s/"')]+(\/[^\s"')]*)?/gi)) {
+    const path = (m[1] || '').split('?')[0];
+    if (path && path !== '/') { route = path; break; }
+    if (!route) route = '/';
+  }
+  if (!route) {
+    // Explicit absolute path in prose ("/oauth2/authorize", "/swagger.json") is a boundary.
+    const pm = text.match(/(?:^|\s|"')(\/[a-z0-9][a-z0-9_\-/.]{1,120})(?=\s|"|'|$)/i);
+    if (pm) route = pm[1];
+  }
+  const lower = text.toLowerCase();
+  const selector = SYNTH_SELECTORS.find(([re]) => re.test(lower))?.[1] ?? '';
+  const tokens = new Set(
+    String(f.title ?? '')
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, ' ')
+      .split(' ')
+      .filter((t) => t.length > 2 && !SYNTH_STOP.has(t)),
+  );
+  return { category, route, selector, tokens };
+}
+
+/**
+ * Categories whose security meaning is bound to a specific route/boundary (CORS, authorization,
+ * route-specific headers/security behavior, injection, credential exposure). A synthesis in one
+ * of these categories whose boundary CANNOT be confidently resolved (no explicit route, no
+ * capability selector) must NEVER merge into a root/origin candidate — it stays a separate
+ * unverifiable candidate. Ambiguity is never resolved by title similarity.
+ */
+const ROUTE_SENSITIVE_CATEGORIES: ReadonlySet<string> = new Set([
+  'cors', 'authz', 'headers', 'rce', 'sqli', 'xss', 'credential',
+]);
+
+/**
+ * Categories whose semantics are legitimately origin/service-wide (host transport posture).
+ * An origin-level merge is allowed for these even without a literal route.
+ */
+const ORIGIN_WIDE_CATEGORIES: ReadonlySet<string> = new Set(['tls', 'cleartext']);
+
+/**
+ * Whether a no-evidence SYNTHESIS describes the same canonical condition as an existing
+ * finding on the same target. Conservative boundary policy:
+ *   1. Explicit route on the synthesis (root included) → EXACT route match required.
+ *   2. No route, but a capability selector (api-docs/dns/version) that confidently resolves
+ *      the boundary/artifact → selector identity merge.
+ *   3. Route-sensitive category with no recoverable boundary → NO merge (stays unverifiable).
+ *   4. Origin/service-wide category semantics (TLS/transport posture) → origin-level merge.
+ *   5. Coarse categories → strong title-token overlap (category+target already matched —
+ *      never wording alone).
+ */
+export function synthesisMatches(incoming: SynthesisProfile, existing: SynthesisProfile): boolean {
+  if (incoming.category !== existing.category) return false;
+  // 1. Confidently resolved boundary: exact match (explicit root matches only root).
+  if (incoming.route) return existing.route === incoming.route;
+  // 2. Selector-level capability identity (e.g. api-docs synthesis ↔ /swagger.json observation).
+  if (incoming.selector && incoming.selector === existing.selector) return true;
+  // 3. Route-sensitive category, boundary unresolvable → do NOT merge into the root candidate.
+  if (ROUTE_SENSITIVE_CATEGORIES.has(incoming.category)) return false;
+  // 4. Origin/service-wide category semantics → origin-level identity is legitimate.
+  if (ORIGIN_WIDE_CATEGORIES.has(incoming.category)) return true;
+  // 5. Coarse categories: strong token overlap (category+target already matched — not wording alone).
+  if (incoming.tokens.size && existing.tokens.size) {
+    let inter = 0;
+    for (const t of incoming.tokens) if (existing.tokens.has(t)) inter++;
+    const union = new Set([...incoming.tokens, ...existing.tokens]).size;
+    if (union > 0 && inter / union >= 0.5) return true;
+  }
+  return false;
+}

@@ -7654,7 +7654,7 @@ Correlating findings across agents, identifying patterns, producing actionable i
                 </div>
                 ${term.completionReason ? `<div style="font-size:12px;color:var(--text-secondary);margin-bottom:10px;">${esc(term.completionReason)}</div>` : ''}
                 <div style="font-size:11px;color:var(--text-muted);margin-bottom:10px;">
-                  tasks: ${ts.completed ?? 0} completed · ${ts.failed ?? 0} failed · ${ts.blocked ?? 0} blocked · ${ts.skipped ?? 0} skipped · ${ts.retried ?? 0} retried
+                  tasks: ${ts.completed ?? 0} completed${ts.partial ? ` (${ts.partial} partial coverage)` : ''} · ${ts.failed ?? 0} failed · ${ts.blocked ?? 0} blocked · ${ts.skipped ?? 0} skipped · ${ts.retried ?? 0} retried
                 </div>
                 ${completed.length ? `<div style="margin-bottom:8px;"><div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px;">Completed prerequisite work</div>${completed.map(p => `<div style="font-size:12px;color:#00ff88;">✓ ${esc(p.name)}</div>`).join('')}</div>` : ''}
                 ${blocked.length ? `<div style="margin-bottom:8px;"><div style="font-size:10px;color:var(--text-muted);text-transform:uppercase;letter-spacing:1px;margin-bottom:4px;">Not exercised — blocked prerequisites</div>${blocked.map(p => `<div style="font-size:12px;color:#ff4444;">✗ ${esc(p.name)}</div><div style="font-size:11px;color:var(--text-muted);margin:2px 0 6px 16px;">${esc(p.reason || '')}</div>`).join('')}</div>` : ''}
@@ -7746,16 +7746,25 @@ Correlating findings across agents, identifying patterns, producing actionable i
                     taskEl.innerHTML = '<div style="padding:18px;color:var(--text-muted);font-size:12px;">No mission tasks are queued.</div>';
                 } else {
                     taskEl.innerHTML = tasks.map(task => {
-                        const color = liveScanStatusColor(task.status);
+                        // Coverage truth: a COMPLETED task whose structured disposition is
+                        // 'partial' EXECUTED but left a required sub-objective unverified —
+                        // render PARTIAL (amber), never a plain COMPLETED badge, never blocked.
+                        const isPartial = task.status === 'completed' && task.result?.disposition === 'partial';
+                        const color = isPartial ? '#ffaa00' : liveScanStatusColor(task.status);
+                        const badge = isPartial ? 'PARTIAL' : (task.status || 'unknown');
                         const output = task.result?.error || task.result?.output || '';
+                        const partialNote = isPartial
+                            ? `Executed · incomplete coverage${task.result?.dispositionReason ? ' — ' + task.result.dispositionReason : ''}`
+                            : '';
                         return `
                             <div style="padding:11px 14px;border-bottom:1px solid rgba(255,255,255,0.06);display:grid;grid-template-columns:minmax(0,1fr) auto;gap:10px;">
                                 <div style="min-width:0;">
                                     <div style="font-size:12px;color:var(--text-primary);font-weight:700;overflow-wrap:anywhere;">${liveScanEscape(task.name || task.id)}</div>
                                     <div style="font-size:10px;color:var(--text-muted);margin-top:4px;">${liveScanEscape(task.phase || '-')} · ${liveScanEscape(task.operatorType || '-')} ${task.assignedTo ? '· ' + liveScanEscape(task.assignedTo) : ''}</div>
+                                    ${partialNote ? `<div style="font-size:10px;color:#ffaa00;margin-top:6px;overflow-wrap:anywhere;">${liveScanEscape(partialNote).slice(0, 260)}</div>` : ''}
                                     ${output ? `<div style="font-size:10px;color:var(--text-secondary);margin-top:6px;overflow-wrap:anywhere;">${liveScanEscape(output).slice(0, 260)}</div>` : ''}
                                 </div>
-                                <div style="font-family:'JetBrains Mono',monospace;font-size:10px;color:${color};text-transform:uppercase;">${liveScanEscape(task.status || 'unknown')}</div>
+                                <div style="font-family:'JetBrains Mono',monospace;font-size:10px;color:${color};text-transform:uppercase;">${liveScanEscape(badge)}</div>
                             </div>
                         `;
                     }).join('');
@@ -15725,7 +15734,7 @@ Be brutally honest. This is not a pep talk.`;
                 md += `Objective class: ${term.objectiveClass || 'general'}\n`;
                 if (term.objectiveOutcome) md += `Objective outcome: ${term.objectiveOutcome}\n`;
                 if (term.completionReason) md += `Completion reason: ${term.completionReason}\n`;
-                if (term.taskSummary) md += `Tasks: ${term.taskSummary.total} total — ${term.taskSummary.completed} completed, ${term.taskSummary.failed} failed, ${term.taskSummary.skipped} skipped, ${term.taskSummary.blocked} blocked\n`;
+                if (term.taskSummary) md += `Tasks: ${term.taskSummary.total} total — ${term.taskSummary.completed} completed${term.taskSummary.partial ? ` (${term.taskSummary.partial} partial coverage)` : ''}, ${term.taskSummary.failed} failed, ${term.taskSummary.skipped} skipped, ${term.taskSummary.blocked} blocked\n`;
             }
             md += `\n`;
 
