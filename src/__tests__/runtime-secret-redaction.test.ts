@@ -22,6 +22,8 @@ import {
   redactLedgerText,
   registerRuntimeSecrets,
   clearRuntimeSecrets,
+  replaceRuntimeSecretSource,
+  clearRuntimeSecretSource,
 } from '../redact.js';
 
 // Deliberately opaque values that trip NONE of the pattern rules: no "Bearer " prefix, not a JWT,
@@ -95,10 +97,20 @@ describe('registered runtime secrets are stripped by the central pattern-blind r
     expect(redactString('the abc of security is abc')).toBe('the abc of security is abc');
   });
 
-  it('registration replaces the prior set (does not accumulate across missions)', () => {
+  it('registration replaces the prior LEGACY set (does not accumulate across missions)', () => {
     registerRuntimeSecrets([BEARER_TOKEN]);
     registerRuntimeSecrets([COOKIE_VALUE]);
     expect(redactString(BEARER_TOKEN)).toContain(BEARER_TOKEN); // first mission's secret no longer tracked
+    expect(redactString(COOKIE_VALUE)).toBe('[redacted]');
+  });
+
+  it('namespaced sources union; clearing one source keeps the other', () => {
+    replaceRuntimeSecretSource('mission:a:principals', [BEARER_TOKEN]);
+    replaceRuntimeSecretSource('mission:b:principals', [COOKIE_VALUE]);
+    expect(redactString(BEARER_TOKEN)).toBe('[redacted]');
+    expect(redactString(COOKIE_VALUE)).toBe('[redacted]');
+    clearRuntimeSecretSource('mission:a:principals');
+    expect(redactString(BEARER_TOKEN)).toContain(BEARER_TOKEN);
     expect(redactString(COOKIE_VALUE)).toBe('[redacted]');
   });
 

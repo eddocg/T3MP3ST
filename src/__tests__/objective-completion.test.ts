@@ -395,7 +395,7 @@ describe('API surface — terminal snapshot + mission-context objective block', 
       serverSource.indexOf('function recordTerminalMissionSnapshot'),
       serverSource.indexOf('function materializeBlockedPrerequisite'),
     );
-    expect(builder).toContain('runtimeTargetHeaderMetadata');
+    expect(builder).toContain('snapshotAuthContext');
     expect(builder).toContain('headerNames');
     expect(builder).not.toContain('headers.values()');
   });

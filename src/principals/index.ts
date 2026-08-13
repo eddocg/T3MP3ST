@@ -1,0 +1,68 @@
+export type {
+  PrincipalRuntimeStatus,
+  OAuth2Flow,
+  OAuth2ClientAuth,
+  AuthProfileWrite,
+  PrincipalWrite,
+  PrincipalPublic,
+  AuthValidationCode,
+  AuthValidationFailure,
+} from './types.js';
+export {
+  FORBIDDEN_AUTH_HEADERS,
+  MAX_PRINCIPALS_PER_MISSION,
+  principalSecretSourceId,
+  normalizeHttpOrigin,
+  validationToolError,
+} from './types.js';
+export {
+  putPrincipals,
+  upsertLegacyHeadersPrincipal,
+  deletePrincipal,
+  listPrincipals,
+  getStoredPrincipal,
+  missionPrincipalCount,
+  anyMissionHasMultiplePrincipals,
+  teardownMissionPrincipals,
+  teardownAllPrincipals,
+  setPrincipalOauthMaterial,
+  compilePrincipalHeaders,
+  selectPrincipal,
+  missionAuthSnapshot,
+  preflightPrincipalSelection,
+  registerMissionSecretValues,
+  oauthHeadersAttachable,
+  type StoredPrincipal,
+  type OAuthRuntimeMaterial,
+} from './store.js';
+export {
+  parseAuthMode,
+  resolveRequestAuth,
+  setLegacyHeaderProvider,
+  mergeExplicitHeaders,
+  authValidationResult,
+  AUTH_MODES,
+  type AuthMode,
+  type ResolvedAuth,
+  type AuthResolveResult,
+} from './apply.js';
+export {
+  acquireOAuth,
+  refreshOAuth,
+  exchangeOAuthCode,
+  ensureOAuthAccess,
+  buildAuthorizationUrl,
+  importOAuthFromOpenApi,
+  setOAuthScopedHttp,
+  isExpired,
+  EXPIRY_SKEW_MS,
+  type OAuthAcquireResult,
+  type OpenApiOAuthSuggestion,
+  type ScopedHttp,
+} from './oauth.js';
+export {
+  publicPrincipalDto,
+  principalsListBody,
+  oauthActionBody,
+  oauthImportBody,
+} from './dto.js';

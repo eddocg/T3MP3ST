@@ -459,7 +459,7 @@ export class MissionControl extends EventEmitter<MissionEvents> {
    * recon battery. Generic recon is reduced to a labeled prerequisite subset so prerequisites
    * never silently become the entire mission.
    */
-  generateTasksForTarget(targetAddress: string, opts?: { authContextAvailable?: boolean }): void {
+  generateTasksForTarget(targetAddress: string, opts?: { authContextAvailable?: boolean; principalCount?: number }): void {
     const mission = this.getActiveMission();
     if (!mission) return;
 
@@ -791,7 +791,7 @@ export class MissionControl extends EventEmitter<MissionEvents> {
 // TASK FACTORIES
 // =============================================================================
 
-export function createReconTasks(missionId: string, targetAddress: string, opts?: { authContextAvailable?: boolean }): Task[] {
+export function createReconTasks(missionId: string, targetAddress: string, opts?: { authContextAvailable?: boolean; principalCount?: number }): Task[] {
   const tasks: Task[] = [];
 
   // TRANSPORT FIDELITY: when the operator supplied an exact origin, its scheme is intent —
@@ -865,7 +865,7 @@ export function createReconTasks(missionId: string, targetAddress: string, opts?
       id: randomUUID(),
       missionId,
       name: 'Authenticated Surface Baseline (current principal)',
-      description: `lane:baseline. A credential context is configured for the exact origin of ${targetAddress}. Establish the CURRENT principal's authenticated baseline, bounded and additive to broad coverage: (1) fetch a small set of representative routes (root, any discovered API index, one or two discovered resource routes) WITH the configured authenticated context (http_request/curl_request default authMode "inherit") and again deliberately WITHOUT it (pass authMode "none" — the ONLY supported values are exactly "inherit" and "none"; any other value is a validation error); (2) record the differential (status code, redirect, content-length/body hash) per route as evidence tagged authContextApplied; (3) note which surface is only visible authenticated. This is single-principal baseline work — do NOT attempt cross-principal (A/B) comparisons, do NOT probe other principals' resources, and do NOT treat this as authorization-boundary verification. If the request tools genuinely cannot execute, end with outcome "blocked" in the debrief (never narrate inability and finish as completed).`,
+      description: `lane:baseline. A credential context is configured for the exact origin of ${targetAddress}. Establish the CURRENT principal's authenticated baseline, bounded and additive to broad coverage: (1) fetch a small set of representative routes (root, any discovered API index, one or two discovered resource routes) WITH the configured authenticated context (http_request/curl_request default authMode "inherit"${(opts?.principalCount ?? 0) >= 2 ? ' and pass principalId from control-plane context when selecting among principals' : ''}) and again deliberately WITHOUT it (pass authMode "none" — the ONLY supported values are exactly "inherit" and "none"; any other value is a validation error); (2) record the differential (status code, redirect, content-length/body hash) per route as evidence tagged authContextApplied; (3) note which surface is only visible authenticated. This is single-principal baseline work — do NOT attempt cross-principal (A/B) comparisons, do NOT probe other principals' resources, and do NOT treat this as authorization-boundary verification. If the request tools genuinely cannot execute, end with outcome "blocked" in the debrief (never narrate inability and finish as completed).`,
       phase: KillChainPhase.RECON,
       operatorType: 'scanner',
       status: 'pending',

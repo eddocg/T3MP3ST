@@ -6,6 +6,7 @@
 
 import { EventEmitter } from 'eventemitter3';
 import { randomUUID } from 'crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { execFile } from 'child_process';
 import { mkdtemp, rm, writeFile } from 'fs/promises';
 import { tmpdir } from 'os';
@@ -26,12 +27,28 @@ import type {
   Target,
   LLMToolDefinition,
   RiskTier,
+  ToolParameter,
 } from '../types/index.js';
 import { ToolError, ToolErrorCategory } from '../types/index.js';
 import { validateToolArgs, buildJsonSchema, assertSchemaDepth } from '../validation/index.js';
-import { registerRuntimeSecrets, clearRuntimeSecrets } from '../redact.js';
+import { registerRuntimeSecrets, clearRuntimeSecretSource, LEGACY_TARGET_HEADER_SECRET_SOURCE, listRuntimeSecrets } from '../redact.js';
 import { maybeIngestOpenApiArtifact, specMetaHint } from '../surface/context.js';
 import { parseToolOutput } from './parsers.js';
+import type { PrincipalRuntimeStatus } from '../principals/types.js';
+import {
+  parseAuthMode,
+  resolveRequestAuth,
+  setLegacyHeaderProvider,
+  mergeExplicitHeaders,
+  validationToolError,
+  listPrincipals,
+  preflightPrincipalSelection,
+  ensureOAuthAccess,
+  setOAuthScopedHttp,
+  selectPrincipal,
+  getStoredPrincipal,
+  oauthHeadersAttachable,
+} from '../principals/index.js';
 
 const dnsResolve = promisify(dns.resolve);
 const dnsResolve4 = promisify(dns.resolve4);
@@ -155,6 +172,15 @@ export function runtimeTargetHeaderMetadata(): { present: boolean; origin: strin
   return { present: [...config.headers.keys()].length > 0, origin: config.origin, headerNames: [...config.headers.keys()] };
 }
 
+/** Internal compile-to-store peek — values never leave the process over HTTP. */
+export function peekRuntimeTargetHeaders(): { origin: string; headers: Record<string, string> } | null {
+  const config = parseTargetHeaderConfig();
+  if (!config) return null;
+  const headers: Record<string, string> = {};
+  config.headers.forEach((value, name) => { headers[name] = value; });
+  return { origin: config.origin, headers };
+}
+
 // =============================================================================
 // RUNTIME SCAN PACING POLICY (mission-scoped)
 // =============================================================================
@@ -199,7 +225,7 @@ export function runtimeScanPolicy(): RuntimeScanPolicy {
 function syncRedactRuntimeSecrets(): void {
   const config = parseTargetHeaderConfig();
   if (!config) {
-    clearRuntimeSecrets();
+    clearRuntimeSecretSource(LEGACY_TARGET_HEADER_SECRET_SOURCE);
     return;
   }
   registerRuntimeSecrets([...config.headers.values()].filter(Boolean));
@@ -241,18 +267,72 @@ export function resolveAuthMode(value: unknown): AuthMode {
   );
 }
 
-function targetHeadersForUrl(url: string | URL, explicit?: RequestInit['headers'], authMode: AuthMode = 'inherit'): Headers | undefined {
-  const merged = new Headers();
-  const config = authMode === 'none' ? null : parseTargetHeaderConfig();
+interface ExecuteAlsStore {
+  context: ToolContext;
+  scope: ArsenalScope | null;
+}
+const executeAls = new AsyncLocalStorage<ExecuteAlsStore>();
+
+function legacySingletonHeaders(url: string | URL, authMode: AuthMode): Headers | undefined {
+  if (authMode === 'none') return undefined;
+  const config = parseTargetHeaderConfig();
+  if (!config) return undefined;
   try {
-    if (config && new URL(url).origin === config.origin) {
-      config.headers.forEach((value, name) => merged.set(name, value));
-    }
+    if (new URL(url).origin !== config.origin) return undefined;
   } catch {
-    // Let fetch or curl report malformed URLs; they simply receive no configured secrets.
+    return undefined;
   }
-  new Headers(explicit).forEach((value, name) => merged.set(name, value));
-  return merged.keys().next().done ? undefined : merged;
+  const headers = new Headers();
+  config.headers.forEach((value, name) => headers.set(name, value));
+  return headers.keys().next().done ? undefined : headers;
+}
+
+setLegacyHeaderProvider(legacySingletonHeaders);
+
+function resolveForRequest(url: string | URL, authMode: AuthMode) {
+  const store = executeAls.getStore();
+  return resolveRequestAuth(store?.context ?? { parameters: { authMode } }, url);
+}
+
+function targetHeadersForUrl(url: string | URL, explicit?: RequestInit['headers'], authMode: AuthMode = 'inherit'): Headers | undefined {
+  const resolved = resolveForRequest(url, authMode);
+  const configured = resolved.ok ? resolved.headers : undefined;
+  return mergeExplicitHeaders(configured, explicit);
+}
+
+function authToolParams(description?: string): ToolParameter[] {
+  return [
+    {
+      name: 'authMode',
+      type: 'string',
+      description: description
+        || 'Credential context: "inherit" (default) or "none" (deliberately unauthenticated — for auth-vs-unauth baselines). Exactly inherit|none.',
+      required: false,
+      enum: ['inherit', 'none'],
+    },
+    {
+      name: 'principalId',
+      type: 'string',
+      description: 'Optional principal id from control-plane context. Required when multiple principals are configured and no default is set. Never a secret.',
+      required: false,
+    },
+  ];
+}
+
+function authFindingFields(url: string | URL, authMode: AuthMode): {
+  authContextApplied: boolean;
+  principalId?: string;
+  authMode: AuthMode;
+  authStatusAtRequest?: PrincipalRuntimeStatus;
+} {
+  const resolved = resolveForRequest(url, authMode);
+  if (!resolved.ok) return { authContextApplied: false, authMode };
+  return {
+    authContextApplied: resolved.applied,
+    principalId: resolved.principalId,
+    authMode: resolved.authMode,
+    authStatusAtRequest: resolved.authStatusAtRequest,
+  };
 }
 
 /**
@@ -262,13 +342,9 @@ function targetHeadersForUrl(url: string | URL, explicit?: RequestInit['headers'
  * that authentication or authorization succeeded. Never exposes header names or values.
  */
 export function credentialHeadersAppliedFor(url: string | URL, authMode: AuthMode = 'inherit'): boolean {
-  if (authMode === 'none') return false; // deliberately suppressed — provenance must say so
-  try {
-    const config = parseTargetHeaderConfig();
-    return !!config && new URL(url).origin === config.origin && [...config.headers.keys()].length > 0;
-  } catch {
-    return false;
-  }
+  if (authMode === 'none') return false;
+  const resolved = resolveForRequest(url, authMode);
+  return resolved.ok && resolved.applied;
 }
 
 // Register any environment-default target-header values with the central redactor at module load, so a
@@ -277,7 +353,10 @@ syncRedactRuntimeSecrets();
 
 function redactConfiguredSecrets(result: ToolResult): ToolResult {
   const config = parseTargetHeaderConfig();
-  const secrets = config ? [...config.headers.values()].filter(Boolean) : [];
+  const secrets = [
+    ...(config ? [...config.headers.values()].filter(Boolean) : []),
+    ...listRuntimeSecrets(),
+  ];
   if (secrets.length === 0) return result;
 
   const redact = (value: unknown): unknown => {
@@ -302,6 +381,19 @@ function redactConfiguredSecrets(result: ToolResult): ToolResult {
  * Returns '' when no configured headers match the tool's target origin (nothing to warn about).
  */
 function unappliedAuthNote(url: string): string {
+  const store = executeAls.getStore();
+  const missionId = store?.context.mission;
+  if (missionId) {
+    const principals = listPrincipals(missionId);
+    if (principals.length) {
+      const labels = principals.map((p) => p.label).join(', ');
+      const names = [...new Set(principals.flatMap((p) => p.headerNames))];
+      return `\n\n[WARN] Principals configured (${labels}${names.length ? `; headers: ${names.join(', ')}` : ''}) `
+        + `but this scanner runs UNAUTHENTICATED — it has no argv-safe way to carry them, and putting a secret `
+        + `on the process command line is disallowed. Treat a "clean" result here as UNVERIFIED for `
+        + `authenticated surface; use curl_request/http_request for authenticated checks.`;
+    }
+  }
   const names = targetHeadersForUrl(url);
   if (!names) return '';
   return `\n\n[WARN] Authenticated target headers are configured for this origin (${[...names.keys()].join(', ')}) `
@@ -315,24 +407,45 @@ const CROSS_ORIGIN_CREDENTIAL_HEADERS = ['authorization', 'cookie', 'cookie2', '
 
 /** Apply exact-origin headers to every built-in fetch without leaking them across redirects. */
 async function targetFetch(url: string | URL, init: RequestInit = {}, authMode: AuthMode = 'inherit'): Promise<Response> {
-  const config = authMode === 'none' ? null : parseTargetHeaderConfig();
+  const store = executeAls.getStore();
+  if (store?.context.mission && authMode !== 'none') {
+    const preview = resolveRequestAuth(store.context, url);
+    if (preview.ok && preview.principalId) {
+      await ensureOAuthAccess(store.context.mission, preview.principalId, store.scope);
+    }
+  }
+
+  const resolved = resolveForRequest(url, authMode);
+  const configured = resolved.ok ? resolved.headers : undefined;
   let currentUrl = new URL(url);
-  if (!config || currentUrl.origin !== config.origin) return globalThis.fetch(url, init);
+  if (authMode === 'none' || !configured || [...configured.keys()].length === 0) {
+    return globalThis.fetch(url, init);
+  }
 
   const explicitHeaders = new Headers(init.headers);
   let method = (init.method || 'GET').toUpperCase();
   let body = init.body;
+  let retriedAfterRefresh = false;
 
   for (let redirects = 0; redirects <= 20; redirects++) {
     const headers = targetHeadersForUrl(currentUrl, explicitHeaders, authMode);
     const response = await globalThis.fetch(currentUrl, { ...init, method, body, headers, redirect: 'manual' });
+    if (response.status === 401 && !retriedAfterRefresh && store?.context.mission && resolved.ok && resolved.principalId) {
+      retriedAfterRefresh = true;
+      const { refreshOAuth } = await import('../principals/index.js');
+      const refreshed = await refreshOAuth(store.context.mission, resolved.principalId, store.scope);
+      if (refreshed.ok) {
+        redirects -= 1;
+        continue;
+      }
+    }
     const location = response.headers.get('location');
     if (!REDIRECT_STATUS.has(response.status) || !location) return response;
     if (redirects === 20) throw new Error('Target request exceeded 20 redirects');
 
     const nextUrl = new URL(location, currentUrl);
     if (nextUrl.origin !== currentUrl.origin) {
-      config.headers.forEach((_value, name) => explicitHeaders.delete(name));
+      configured.forEach((_value, name) => explicitHeaders.delete(name));
       CROSS_ORIGIN_CREDENTIAL_HEADERS.forEach(name => explicitHeaders.delete(name));
     }
     if (response.status === 303 || ((response.status === 301 || response.status === 302) && method === 'POST')) {
@@ -453,6 +566,26 @@ export function scopeViolation(scope: ArsenalScope | null, context: ToolContext)
   }
   return null;
 }
+
+/**
+ * Canonical ScopeGuard-backed HTTP. Scope is checked here; callers must not
+ * fetch first and ask later. This is the network authority for OAuth token calls.
+ */
+export async function scopedInternalFetch(
+  scope: ArsenalScope | null,
+  url: string,
+  init: RequestInit = {},
+): Promise<Response> {
+  const blocked = scopeViolation(scope, { parameters: { url } } as ToolContext);
+  if (blocked) {
+    const err = new Error('oauth_scope_denied');
+    (err as Error & { code: string }).code = 'oauth_scope_denied';
+    throw err;
+  }
+  return globalThis.fetch(url, init);
+}
+
+setOAuthScopedHttp((url, init, scope) => scopedInternalFetch(scope, url, init));
 
 /** Best-effort target for an approval request/warning — the first target-like param, else the
  *  context target address. Informational only (the scope gate does the real host math). */
@@ -582,6 +715,38 @@ export class Arsenal extends EventEmitter<ArsenalEvents> {
       }
     }
 
+    // Auth preflight: invalid authMode / principal selection is a RETURNED safe JSON payload,
+    // never a thrown ToolError.message (those are stripped to category-only for the LLM).
+    const authCapable = tool.parameters?.some((p) => p.name === 'authMode' || p.name === 'principalId');
+    if (authCapable) {
+      const parsed = parseAuthMode(context.parameters.authMode);
+      if (!parsed.ok) {
+        return { success: false, error: validationToolError(parsed) };
+      }
+      const selection = preflightPrincipalSelection(context.mission, parsed.mode, context.parameters.principalId);
+      if (selection) {
+        return { success: false, error: validationToolError(selection) };
+      }
+      if (parsed.mode === 'inherit' && context.mission) {
+        const selected = selectPrincipal(context.mission, context.parameters.principalId);
+        if (selected.ok && selected.principal.auth.type === 'oauth2') {
+          await ensureOAuthAccess(context.mission, selected.principal.id, this.scope);
+          const fresh = getStoredPrincipal(context.mission, selected.principal.id);
+          if (!fresh || !oauthHeadersAttachable(fresh)) {
+            return {
+              success: false,
+              error: validationToolError({
+                ok: false,
+                code: 'oauth_not_live',
+                principalIds: [selected.principal.id],
+                runtimeStatus: fresh?.runtimeStatus ?? selected.principal.runtimeStatus,
+              }),
+            };
+          }
+        }
+      }
+    }
+
     // Validation gate: validate args against tool's parameter schema before handler runs.
     if (tool.parameters && tool.parameters.length > 0) {
       const validationErrors = validateToolArgs(toolName, context.parameters, tool.parameters);
@@ -607,7 +772,10 @@ export class Arsenal extends EventEmitter<ArsenalEvents> {
     const startTime = Date.now();
 
     try {
-      const result = redactConfiguredSecrets(await tool.handler(context));
+      const result = redactConfiguredSecrets(await executeAls.run(
+        { context, scope: this.scope },
+        () => tool.handler(context),
+      ));
       const durationMs = Date.now() - startTime;
 
       execution.completedAt = Date.now();
@@ -720,11 +888,13 @@ export function failResult(error: string): ToolResult {
 
 export function createToolContext(
   target?: Target,
-  parameters?: Record<string, unknown>
+  parameters?: Record<string, unknown>,
+  mission?: string,
 ): ToolContext {
   return {
     target,
     parameters: parameters || {},
+    mission,
   };
 }
 
@@ -1095,7 +1265,7 @@ export const BUILTIN_TOOLS: CustomTool[] = [
       { name: 'method', type: 'string', description: 'HTTP method', required: false, default: 'GET' },
       { name: 'headers', type: 'object', description: 'Request headers', required: false },
       { name: 'body', type: 'string', description: 'Request body', required: false },
-      { name: 'authMode', type: 'string', description: 'Credential context: "inherit" (default) or "none" (deliberately unauthenticated — for auth-vs-unauth baselines)', required: false },
+      ...authToolParams('Credential context: "inherit" (default) or "none" (deliberately unauthenticated — for auth-vs-unauth baselines)'),
     ],
     handler: async (context) => {
       const url = context.parameters.url as string;
@@ -1142,9 +1312,11 @@ export const BUILTIN_TOOLS: CustomTool[] = [
     category: 'web',
     parameters: [
       { name: 'url', type: 'string', description: 'URL to analyze', required: true },
+      ...authToolParams(),
     ],
     handler: async (context) => {
       const url = context.parameters.url as string;
+      const authMode = resolveAuthMode(context.parameters.authMode);
       const securityHeaders = [
         'Strict-Transport-Security', 'Content-Security-Policy', 'X-Frame-Options',
         'X-Content-Type-Options', 'X-XSS-Protection', 'Referrer-Policy',
@@ -1154,7 +1326,7 @@ export const BUILTIN_TOOLS: CustomTool[] = [
         const response = await targetFetch(url, {
           method: 'HEAD',
           signal: AbortSignal.timeout(10000),
-        });
+        }, authMode);
         const analysis = securityHeaders.map(h => {
           const value = response.headers.get(h);
           return `${h}: ${value ? `✓ ${value}` : '✗ Missing'}`;
@@ -2542,7 +2714,7 @@ ${issues.length ? `Issues:\n${issues.join('\n')}` : '✓ No obvious issues'}`,
     parameters: [
       { name: 'url', type: 'string', description: 'Base URL of the target', required: true },
       { name: 'wordlist', type: 'string', description: 'Probe set: common, graphql, rest', required: false, default: 'common' },
-      { name: 'authMode', type: 'string', description: 'Credential context: "inherit" (default) or "none" (deliberately unauthenticated)', required: false },
+      ...authToolParams('Credential context: "inherit" (default) or "none" (deliberately unauthenticated)'),
     ],
     handler: async (context) => {
       const baseUrl = (context.parameters.url as string).replace(/\/+$/, '');
@@ -2654,7 +2826,7 @@ ${issues.length ? `Issues:\n${issues.join('\n')}` : '✓ No obvious issues'}`,
             details: `Found ${apiEndpoints.length} API endpoints: ${apiEndpoints.map(e => e.path).join(', ')}`,
             category: 'info_disclosure',
             observationClass: 'observation' as const,
-            authContextApplied: credentialHeadersAppliedFor(baseUrl, authMode),
+            ...authFindingFields(baseUrl, authMode),
           }] : []),
           ...(docEndpoints.length > 0 ? [{
             title: 'API Documentation Exposed',
@@ -2662,7 +2834,7 @@ ${issues.length ? `Issues:\n${issues.join('\n')}` : '✓ No obvious issues'}`,
             details: `API documentation accessible at: ${docEndpoints.map(e => e.path).join(', ')}`,
             category: 'info_disclosure',
             observationClass: 'observation' as const,
-            authContextApplied: credentialHeadersAppliedFor(baseUrl, authMode),
+            ...authFindingFields(baseUrl, authMode),
           }] : []),
         ] : undefined,
       };
@@ -2674,7 +2846,7 @@ ${issues.length ? `Issues:\n${issues.join('\n')}` : '✓ No obvious issues'}`,
     category: 'web',
     parameters: [
       { name: 'url', type: 'string', description: 'URL to test', required: true },
-      { name: 'authMode', type: 'string', description: 'Credential context: "inherit" (default) or "none" (deliberately unauthenticated)', required: false },
+      ...authToolParams('Credential context: "inherit" (default) or "none" (deliberately unauthenticated)'),
     ],
     handler: async (context) => {
       const url = context.parameters.url as string;
@@ -2749,7 +2921,7 @@ ${issues.length ? `Issues:\n${issues.join('\n')}` : '✓ No obvious issues'}`,
           details: `The following potentially dangerous HTTP methods are enabled: ${dangerousMethods.join(', ')}. This is a hardening OBSERVATION — no unauthorized execution was demonstrated. TRACE can enable XST, PUT/DELETE may allow modification, only IF an authorization boundary actually fails (not tested here).`,
           category: 'info_disclosure',
           observationClass: 'observation' as const,
-          authContextApplied: credentialHeadersAppliedFor(url, authMode),
+          ...authFindingFields(url, authMode),
         }] : undefined,
       };
     },
@@ -2764,7 +2936,7 @@ ${issues.length ? `Issues:\n${issues.join('\n')}` : '✓ No obvious issues'}`,
     category: 'vuln',
     parameters: [
       { name: 'url', type: 'string', description: 'URL to test', required: true },
-      { name: 'authMode', type: 'string', description: 'Credential context: "inherit" (default) or "none" (deliberately unauthenticated)', required: false },
+      ...authToolParams('Credential context: "inherit" (default) or "none" (deliberately unauthenticated)'),
     ],
     handler: async (context) => {
       const url = context.parameters.url as string;
@@ -2858,7 +3030,7 @@ ${issues.length ? `Issues:\n${issues.join('\n')}` : '✓ No obvious issues'}`,
           details: vulnerabilities.join('; '),
           category: 'cors',
           observationClass: 'observation',
-          authContextApplied: credentialHeadersAppliedFor(url, authMode),
+          ...authFindingFields(url, authMode),
         }] : undefined,
       };
     },
@@ -3750,7 +3922,7 @@ export const EXTERNAL_TOOLS: CustomTool[] = [
       { name: 'data', type: 'string', description: 'Request body data', required: false },
       { name: 'headers', type: 'string', description: 'Headers as "Key: Value" (comma separated)', required: false },
       { name: 'flags', type: 'string', description: 'Additional curl flags', required: false },
-      { name: 'authMode', type: 'string', description: 'Credential context: "inherit" (default — attach configured exact-origin headers) or "none" (deliberately unauthenticated request, for auth-vs-unauth baselines)', required: false },
+      ...authToolParams('Credential context: "inherit" (default — attach configured exact-origin headers) or "none" (deliberately unauthenticated request, for auth-vs-unauth baselines)'),
     ],
     handler: async (context) => {
       if (!(await isToolAvailable('curl'))) {

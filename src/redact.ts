@@ -43,19 +43,59 @@ export const SECRET_PATTERNS: Record<string, { pattern: RegExp; severity: string
  * than MIN_RUNTIME_SECRET_LEN are ignored to avoid catastrophically replacing a common substring.
  */
 const runtimeSecrets = new Set<string>();
+const runtimeSecretSources = new Map<string, Set<string>>();
 const MIN_RUNTIME_SECRET_LEN = 6;
+/** Compatibility source used by registerRuntimeSecrets / the legacy target-header singleton. */
+export const LEGACY_TARGET_HEADER_SECRET_SOURCE = 'legacy-target-headers';
 
-/** Register known literal secret values so redactString/redactSecrets strip them centrally. Replaces the set. */
-export function registerRuntimeSecrets(values: Iterable<string>): void {
+function rebuildRuntimeSecretUnion(): void {
   runtimeSecrets.clear();
-  for (const v of values) {
-    if (typeof v === 'string' && v.length >= MIN_RUNTIME_SECRET_LEN) runtimeSecrets.add(v);
+  for (const values of runtimeSecretSources.values()) {
+    for (const v of values) runtimeSecrets.add(v);
   }
 }
 
-/** Drop all registered runtime secret values (mission teardown / no binding). */
+function toSecretSet(values: Iterable<string>): Set<string> {
+  const set = new Set<string>();
+  for (const v of values) {
+    if (typeof v === 'string' && v.length >= MIN_RUNTIME_SECRET_LEN) set.add(v);
+  }
+  return set;
+}
+
+/**
+ * Replace one named secret source. The effective redaction set is the UNION across all sources.
+ * PrincipalRuntimeStore uses `mission:<missionId>:principals` and must never clobber other sources.
+ */
+export function replaceRuntimeSecretSource(sourceId: string, values: Iterable<string>): void {
+  if (!sourceId) return;
+  const set = toSecretSet(values);
+  if (set.size === 0) runtimeSecretSources.delete(sourceId);
+  else runtimeSecretSources.set(sourceId, set);
+  rebuildRuntimeSecretUnion();
+}
+
+/** Drop one named secret source; other sources remain registered. */
+export function clearRuntimeSecretSource(sourceId: string): void {
+  if (!sourceId) return;
+  runtimeSecretSources.delete(sourceId);
+  rebuildRuntimeSecretUnion();
+}
+
+/** Register known literal secret values. Compatibility wrapper: replaces the LEGACY source only. */
+export function registerRuntimeSecrets(values: Iterable<string>): void {
+  replaceRuntimeSecretSource(LEGACY_TARGET_HEADER_SECRET_SOURCE, values);
+}
+
+/** Drop ALL registered runtime secret sources (tests / full teardown). */
 export function clearRuntimeSecrets(): void {
+  runtimeSecretSources.clear();
   runtimeSecrets.clear();
+}
+
+/** Snapshot of the union of all registered runtime secret values (for tool-result redaction). */
+export function listRuntimeSecrets(): string[] {
+  return [...runtimeSecrets];
 }
 
 export function redactString(value: string): string {

@@ -480,6 +480,9 @@ export class OperatorAgent extends EventEmitter<OperatorEvents> {
           category: finding.category,
           observationClass: finding.observationClass,
           authContextApplied: finding.authContextApplied,
+          principalId: finding.principalId,
+          authMode: finding.authMode,
+          authStatusAtRequest: finding.authStatusAtRequest,
           evidence: toolBacked
             ? [{
                 type: 'output',

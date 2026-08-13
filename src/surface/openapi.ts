@@ -65,6 +65,10 @@ export interface OpenApiSecurityScheme {
   in?: string;
   flows?: string[];
   scopes?: string[];
+  /** Intelligence only — never an executable origin / never auto-joins scope. */
+  authorizationUrl?: string;
+  tokenUrl?: string;
+  refreshUrl?: string;
 }
 
 export interface OpenApiArtifact {
@@ -228,18 +232,31 @@ function extractSecuritySchemes(doc: Record<string, unknown>, maxStr: number): O
     const flowsObj = asObject(s.flows);
     const flows = flowsObj ? Object.keys(flowsObj).map((f) => cap(f, maxStr)) : undefined;
     const scopeSet = new Set<string>();
+    let authorizationUrl: string | undefined;
+    let tokenUrl: string | undefined;
+    let refreshUrl: string | undefined;
     if (flowsObj) {
       for (const flow of Object.values(flowsObj)) {
-        const scopes = asObject(asObject(flow)?.scopes);
+        const f = asObject(flow);
+        const scopes = asObject(f?.scopes);
         if (scopes) for (const sc of Object.keys(scopes)) scopeSet.add(cap(sc, maxStr));
+        if (typeof f?.authorizationUrl === 'string' && !authorizationUrl) authorizationUrl = cap(f.authorizationUrl, maxStr);
+        if (typeof f?.tokenUrl === 'string' && !tokenUrl) tokenUrl = cap(f.tokenUrl, maxStr);
+        if (typeof f?.refreshUrl === 'string' && !refreshUrl) refreshUrl = cap(f.refreshUrl, maxStr);
       }
     }
+    if (typeof s.authorizationUrl === 'string') authorizationUrl = cap(s.authorizationUrl, maxStr);
+    if (typeof s.tokenUrl === 'string') tokenUrl = cap(s.tokenUrl, maxStr);
+    if (typeof s.refreshUrl === 'string') refreshUrl = cap(s.refreshUrl, maxStr);
     out.push({
       name: cap(name, maxStr),
       type: cap(s.type, maxStr),
       in: typeof s.in === 'string' ? cap(s.in, maxStr) : undefined,
       flows,
       scopes: scopeSet.size ? [...scopeSet] : undefined,
+      authorizationUrl,
+      tokenUrl,
+      refreshUrl,
     });
     if (out.length >= 200) break;
   }

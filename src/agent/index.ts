@@ -76,6 +76,16 @@ export interface ControlPlaneContext {
   constraints: string[];
   /** Tool names registered and callable for THIS session. */
   toolNames: string[];
+  /** Names-only principal list. Never secrets. */
+  principals?: Array<{
+    id: string;
+    label: string;
+    roleHint?: string;
+    origin: string;
+    authMethod: string;
+    runtimeStatus: string;
+    default: boolean;
+  }>;
 }
 
 // =============================================================================
@@ -164,6 +174,7 @@ export interface AgentEvents {
 export class AgentLoop extends EventEmitter<AgentEvents> {
   private llm: LLMBackbone;
   private arsenal: Arsenal;
+  private currentMissionId?: string;
   private options: Required<Omit<AgentLoopOptions, 'controlContext' | 'surfaceContext'>> &
     Pick<AgentLoopOptions, 'controlContext' | 'surfaceContext'>;
 
@@ -194,6 +205,7 @@ export class AgentLoop extends EventEmitter<AgentEvents> {
     sourceContext?: string,
     sharedContext?: string
   ): Promise<AgentResult> {
+    this.currentMissionId = task.missionId;
     const startTime = Date.now();
     const steps: AgentStep[] = [];
     const allFindings: ToolFinding[] = [];
@@ -491,6 +503,7 @@ export class AgentLoop extends EventEmitter<AgentEvents> {
     try {
       toolResult = await this.arsenal.execute(toolCall.name, {
         target,
+        mission: this.currentMissionId,
         parameters: toolCall.arguments,
       });
     } catch (err) {
@@ -573,6 +586,12 @@ export class AgentLoop extends EventEmitter<AgentEvents> {
       }
       for (const c of control.constraints) {
         parts.push(`- **Constraint/ROE**: ${c}`);
+      }
+      if (control.principals && control.principals.length > 0) {
+        parts.push(`- **Principals (names/status only)**: ${control.principals.map((p) => `${p.id} (${p.label}, ${p.authMethod}, ${p.runtimeStatus}${p.default ? ', default' : ''})`).join('; ')}.`);
+        parts.push(`- **Auth rule**: authMode is exactly inherit|none; principalId required when multiple principals are configured and no default is set. Do not invent authMode values such as configured or authenticated.`);
+      } else {
+        parts.push(`- **Auth rule**: authMode is exactly inherit|none. Do not invent authMode values such as configured or authenticated.`);
       }
     }
 

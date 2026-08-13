@@ -222,6 +222,7 @@ import type {
 // Re-export commonly used types
 export { KillChainPhase } from './types/index.js';
 export type { OpsecConfig, Finding, Credential, Target, DetectionEvent } from './types/index.js';
+export type { PrincipalPublic, PrincipalWrite } from './principals/index.js';
 
 import { OperatorCell, OperatorAgent, ARCHETYPE_PROFILES, PHASE_ARCHETYPES, KILL_CHAIN_ORDER } from './operators/index.js';
 import { PackBoard } from './pack/board.js';
@@ -240,9 +241,27 @@ import {
   runSubprocess,
   isToolAvailable,
   runtimeTargetHeaderMetadata,
+  peekRuntimeTargetHeaders,
   setRuntimeScanPolicy,
   clearRuntimeScanPolicy,
+  clearRuntimeTargetHeaders,
 } from './arsenal/index.js';
+import {
+  listPrincipals,
+  missionPrincipalCount,
+  putPrincipals,
+  upsertLegacyHeadersPrincipal,
+  teardownMissionPrincipals,
+  teardownAllPrincipals,
+  type PrincipalWrite,
+} from './principals/index.js';
+
+/** Process-wide principal/OAuth + legacy-header teardown (stop, shutdown). */
+export function teardownAuthRuntime(): void {
+  teardownAllPrincipals();
+  clearRuntimeTargetHeaders();
+}
+
 import { buildAdapterTools } from './arsenal/adapter-tools.js';
 import { buildPostExTools } from './arsenal/post-ex.js';
 import { ApprovalController, type ApprovalRequest } from './arsenal/approval.js';
@@ -344,6 +363,8 @@ export class TempestCommand extends EventEmitter<CommandEvents> {
   private readonly objectiveDirective?: string;
   private readonly missionFamily?: import('./types/index.js').MissionFamily;
   private readonly allowFullRangeScans?: boolean;
+  /** Launch-time principals applied when the mission actually starts (runtime-only). */
+  private pendingPrincipals: PrincipalWrite[] | null = null;
 
   /**
    * White-box source context (security-prioritized code excerpt), set by the
@@ -563,7 +584,10 @@ export class TempestCommand extends EventEmitter<CommandEvents> {
     this.targetEnv.on('target:added', (target) => {
       this.syncArsenalScope();
       if (this.mission.getActiveMission()) {
-        this.mission.generateTasksForTarget(target.address, { authContextAvailable: runtimeTargetHeaderMetadata().present });
+        this.mission.generateTasksForTarget(target.address, {
+          authContextAvailable: this.authContextAvailable(),
+          principalCount: this.activePrincipalCount(),
+        });
         this.taskSeeded = true;
       }
     });
@@ -877,6 +901,32 @@ export class TempestCommand extends EventEmitter<CommandEvents> {
       allowFullRangeScans: this.allowFullRangeScans,
     });
     this.mission.startMission(mission.id);
+    this.attachAuthToMission(mission.id);
+  }
+
+  public setPendingPrincipals(writes: PrincipalWrite[] | null): void {
+    this.pendingPrincipals = writes && writes.length ? writes : null;
+  }
+
+  public attachAuthToMission(missionId: string): void {
+    if (this.pendingPrincipals?.length) {
+      putPrincipals(missionId, this.pendingPrincipals);
+      this.pendingPrincipals = null;
+      return;
+    }
+    const peek = peekRuntimeTargetHeaders();
+    if (peek) upsertLegacyHeadersPrincipal(missionId, peek.origin, peek.headers);
+  }
+
+  private authContextAvailable(): boolean {
+    const mission = this.mission.getActiveMission();
+    if (mission && missionPrincipalCount(mission.id) > 0) return true;
+    return runtimeTargetHeaderMetadata().present;
+  }
+
+  private activePrincipalCount(): number {
+    const mission = this.mission.getActiveMission();
+    return mission ? missionPrincipalCount(mission.id) : (runtimeTargetHeaderMetadata().present ? 1 : 0);
   }
 
   /**
@@ -910,6 +960,10 @@ export class TempestCommand extends EventEmitter<CommandEvents> {
     this.timedOutDispatches.clear();
     // Mission-scoped scan pacing authorization never leaks past the run that granted it.
     clearRuntimeScanPolicy();
+    const activeForAuth = this.mission.getActiveMission();
+    if (activeForAuth) teardownMissionPrincipals(activeForAuth.id);
+    else teardownAllPrincipals();
+    clearRuntimeTargetHeaders();
     // Disarm the surface ingest sink so no post-stop fetch can mutate a torn-down mission. If the
     // mission didn't complete cleanly (operator abort/stop), destroy the mutable surface state
     // WITHOUT retaining a terminal snapshot — raw/derived spec state must not outlive an abort.
@@ -1076,9 +1130,10 @@ export class TempestCommand extends EventEmitter<CommandEvents> {
         // A configured credential context (exact-origin runtime headers) makes the general
         // recon battery add ONE bounded current-principal authenticated baseline task —
         // additive coverage, never a narrowing to authorization_lifecycle.
-        const authContextAvailable = runtimeTargetHeaderMetadata().present;
+        const authContextAvailable = this.authContextAvailable();
+        const principalCount = this.activePrincipalCount();
         for (const target of targets) {
-          this.mission.generateTasksForTarget(target.address, { authContextAvailable });
+          this.mission.generateTasksForTarget(target.address, { authContextAvailable, principalCount });
         }
         this.taskSeeded = true;
 
@@ -1734,6 +1789,18 @@ export class TempestCommand extends EventEmitter<CommandEvents> {
     if (mission?.objectiveClass === 'authorization_lifecycle') {
       constraints.push('Objective lane: authorization_lifecycle — bounded prerequisite/baseline work only; cross-principal differentials require fixtures the control plane will name when absent.');
     }
+    constraints.push('authMode is exactly inherit|none; principalId required when multiple principals are configured and no default is set.');
+    const principals = mission
+      ? listPrincipals(mission.id).map((p) => ({
+          id: p.id,
+          label: p.label,
+          roleHint: p.roleHint,
+          origin: p.origin,
+          authMethod: p.authMethod,
+          runtimeStatus: p.runtimeStatus,
+          default: p.default,
+        }))
+      : [];
     return {
       authorizedOrigins: origins,
       // Dispatch through the execution gate IS the authorization signal: an active mission means
@@ -1741,6 +1808,7 @@ export class TempestCommand extends EventEmitter<CommandEvents> {
       missionAuthorized: !!mission,
       constraints,
       toolNames: sessionTools?.length ? [...sessionTools] : this.arsenal.getToolDefinitions().map((t) => t.name),
+      principals,
     };
   }
 

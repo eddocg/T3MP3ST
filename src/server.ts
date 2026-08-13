@@ -22,7 +22,7 @@ import { resolveModels } from './config/provider-models.js';
 import { initProxyFromConfig, configureProxy, getProxyStatus, checkIp, invalidateIpCache } from './net/proxy.js';
 import { redactString, redactLedgerText, redactSecrets } from './redact.js';
 import { LLMBackbone } from './llm/index.js';
-import { TempestCommand } from './index.js';
+import { TempestCommand, teardownAuthRuntime } from './index.js';
 import { OpGeneral } from './general/index.js';
 import type { Directive } from './general/index.js';
 import { detectLocalAgents, pingLocalAgent, runLocalAgent, syncLocalAgentSelection } from './agent/local-agents.js';
@@ -33,6 +33,21 @@ import { OPERATOR_SYSTEM_PROMPTS, PLINIAN_OPERATOR_DOCTRINE, THE_FIXER_SYSTEM_PR
 import { createTargetFromUrl, createTargetFromIP } from './target/index.js';
 import { setRuntimeTargetHeaders, clearRuntimeTargetHeaders } from './arsenal/index.js';
 import { runtimeTargetHeaderMetadata } from './arsenal/index.js';
+import {
+  putPrincipals,
+  deletePrincipal,
+  missionAuthSnapshot,
+  upsertLegacyHeadersPrincipal,
+  teardownMissionPrincipals,
+  acquireOAuth,
+  refreshOAuth,
+  exchangeOAuthCode,
+  importOAuthFromOpenApi,
+  principalsListBody,
+  oauthActionBody,
+  oauthImportBody,
+  type PrincipalWrite,
+} from './principals/index.js';
 import type { OperatorArchetype, LLMProvider, Task, Mission } from './types/index.js';
 import { listOperatorPrompts, setOperatorOverride, resetOperatorOverride, type OperatorOverride } from './operators/index.js';
 import { ingestRepoToSourceContext, runWhiteboxAnalysis, resolveRepoSourceForAnalysis, RepoCloneError, RepoPathError } from './recon/whitebox.js';
@@ -412,11 +427,30 @@ function createTempestCommandInstance(missionName: string, apiKey: string | unde
  * Build + persist the terminal mission snapshot. All free text passes redactLedgerText; auth
  * context is header NAMES only. Persisted via the normal debounced state snapshot.
  */
+function snapshotAuthContext(missionId?: string): {
+  present: boolean;
+  origin: string | null;
+  headerNames: string[];
+  headerCount: number;
+  principalCount: number;
+} {
+  const fromStore = missionId ? missionAuthSnapshot(missionId) : missionAuthSnapshot();
+  if (fromStore.principalCount > 0) return fromStore;
+  const auth = runtimeTargetHeaderMetadata();
+  return {
+    present: auth.present,
+    origin: auth.origin,
+    headerNames: auth.headerNames,
+    headerCount: auth.headerNames.length,
+    principalCount: auth.present ? 1 : 0,
+  };
+}
+
 function recordTerminalMissionSnapshot(mission: Mission, status: 'completed' | 'aborted', cmd: TempestCommand | null): void {
   const tasks = cmd ? cmd.mission.getTaskQueue().getForMission(mission.id) : [];
   const count = (s: string) => tasks.filter((t) => t.status === s).length;
   const completion = deriveObjectiveCompletion(mission, tasks);
-  const auth = runtimeTargetHeaderMetadata();
+  const auth = snapshotAuthContext(mission.id);
   const snapshot: TerminalMissionSnapshot = {
     id: mission.id,
     name: redactLedgerText(mission.name, 240),
@@ -449,12 +483,8 @@ function recordTerminalMissionSnapshot(mission: Mission, status: 'completed' | '
       present: auth.present,
       origin: auth.origin,
       headerNames: auth.headerNames,
-      // headerNames.length — the count of bound credential header NAMES (never values).
-      headerCount: auth.headerNames.length,
-      // Independently controlled principal contexts bound for the mission. The current
-      // single-binding runtime can express at most 1; first-class named multi-principal
-      // profiles are a dedicated follow-up epic (not yet an available capability).
-      principalCount: auth.present ? 1 : 0,
+      headerCount: auth.headerCount,
+      principalCount: auth.principalCount,
     },
     recordedAt: nowIso(),
   };
@@ -1032,8 +1062,7 @@ interface TerminalMissionSnapshot {
   /**
    * Redaction-safe authentication metadata. `headerCount` counts bound credential header
    * NAMES (values never leave the arsenal layer) — it is NOT a principal count.
-   * `principalCount` counts independently controlled principal contexts (0 or 1 in the
-   * current single-binding runtime; N requires the multi-principal epic).
+   * `principalCount` counts independently controlled principal contexts (runtime store).
    */
   authContext: { present: boolean; origin: string | null; headerNames: string[]; headerCount: number; principalCount: number };
   recordedAt: string;
@@ -1621,6 +1650,14 @@ function bindMissionTargetHeaders(body: Record<string, unknown>, target: string)
   const headersJson = typeof raw === 'string' ? raw : JSON.stringify(raw);
   const names = setRuntimeTargetHeaders(origin, headersJson);
   if (!names) { clearRuntimeTargetHeaders(); return null; }
+  const cmd = getTempestCommand();
+  const mission = cmd?.mission.getActiveMission();
+  if (mission) {
+    try {
+      const parsed = JSON.parse(headersJson) as Record<string, string>;
+      upsertLegacyHeadersPrincipal(mission.id, origin, parsed);
+    } catch { /* binder already validated */ }
+  }
   return names;
 }
 
@@ -2177,7 +2214,7 @@ function latestTerminalSnapshot(): TerminalMissionSnapshot | undefined {
 function liveObjectiveBlock(mission: Mission, cmd: TempestCommand): Record<string, unknown> {
   const tasks = cmd.mission.getTaskQueue().getForMission(mission.id);
   const completion = deriveObjectiveCompletion(mission, tasks);
-  const auth = runtimeTargetHeaderMetadata();
+  const auth = snapshotAuthContext(mission.id);
   return {
     class: mission.objectiveClass ?? 'general',
     outcome: mission.objectiveOutcome ?? null,
@@ -2189,16 +2226,13 @@ function liveObjectiveBlock(mission: Mission, cmd: TempestCommand): Record<strin
       phase: d.phase, disposition: d.disposition, total: d.total,
       completed: d.completed, failed: d.failed, blocked: d.blocked, skipped: d.skipped,
     })),
-    // Redaction-safe auth-context metadata: whether a credential context is bound and the header
-    // NAMES only — never values. Lets a reviewer answer "were credentials configured?" honestly.
-    // headerCount counts header NAMES; principalCount counts independent controlled principals
-    // (0|1 in the current single-binding runtime — N requires the multi-principal epic).
+    // headerCount counts header NAMES; principalCount counts independent controlled principals.
     authContext: {
       present: auth.present,
       origin: auth.origin,
       headerNames: auth.headerNames,
-      headerCount: auth.headerNames.length,
-      principalCount: auth.present ? 1 : 0,
+      headerCount: auth.headerCount,
+      principalCount: auth.principalCount,
     },
   };
 }
@@ -7392,6 +7426,102 @@ app.get('/api/mission/surface/openapi', (_req: Request, res: Response) => {
   }) as Record<string, unknown>);
 });
 
+function activeMissionId(): string | null {
+  return getTempestCommand()?.mission.getActiveMission()?.id ?? null;
+}
+
+function validatePrincipalWrites(writes: unknown): { ok: true; writes: PrincipalWrite[] } | { ok: false; error: string } {
+  if (!Array.isArray(writes)) return { ok: false, error: 'principals must be an array' };
+  const tmp = `__validate_${randomUUID()}`;
+  const result = putPrincipals(tmp, writes as PrincipalWrite[]);
+  teardownMissionPrincipals(tmp);
+  return result.ok ? { ok: true, writes: writes as PrincipalWrite[] } : { ok: false, error: result.error };
+}
+
+let pendingLaunchPrincipals: PrincipalWrite[] | null = null;
+
+app.get('/api/mission/principals', (_req: Request, res: Response) => {
+  const missionId = activeMissionId();
+  res.json(principalsListBody(missionId));
+});
+
+app.put('/api/mission/principals', (req: Request, res: Response) => {
+  const missionId = activeMissionId();
+  if (!missionId) {
+    res.status(409).json({ error: 'no active mission' });
+    return;
+  }
+  const body = req.body as { principals?: PrincipalWrite[] } | PrincipalWrite[];
+  const writes = Array.isArray(body) ? body : body.principals;
+  const result = putPrincipals(missionId, writes ?? []);
+  if (!result.ok) {
+    res.status(400).json({ error: result.error, code: result.error === 'query_api_key_unsupported' ? 'query_api_key_unsupported' : undefined });
+    return;
+  }
+  res.json(principalsListBody(missionId));
+});
+
+app.delete('/api/mission/principals/:id', (req: Request, res: Response) => {
+  const missionId = activeMissionId();
+  if (!missionId) {
+    res.status(409).json({ error: 'no active mission' });
+    return;
+  }
+  const ok = deletePrincipal(missionId, req.params.id);
+  if (!ok) {
+    res.status(404).json({ error: 'unknown principal' });
+    return;
+  }
+  res.json(principalsListBody(missionId));
+});
+
+app.post('/api/mission/principals/:id/auth/acquire', async (req: Request, res: Response) => {
+  const cmd = getTempestCommand();
+  const missionId = cmd?.mission.getActiveMission()?.id;
+  if (!missionId || !cmd) {
+    res.status(409).json({ error: 'no active mission' });
+    return;
+  }
+  const result = await acquireOAuth(missionId, req.params.id, cmd.arsenal.getScope());
+  const body = oauthActionBody(result);
+  res.status(result.ok ? 200 : 400).json(body);
+});
+
+app.post('/api/mission/principals/:id/auth/refresh', async (req: Request, res: Response) => {
+  const cmd = getTempestCommand();
+  const missionId = cmd?.mission.getActiveMission()?.id;
+  if (!missionId || !cmd) {
+    res.status(409).json({ error: 'no active mission' });
+    return;
+  }
+  const result = await refreshOAuth(missionId, req.params.id, cmd.arsenal.getScope());
+  res.status(result.ok ? 200 : 400).json(oauthActionBody(result));
+});
+
+app.post('/api/mission/principals/:id/auth/code', async (req: Request, res: Response) => {
+  const cmd = getTempestCommand();
+  const missionId = cmd?.mission.getActiveMission()?.id;
+  if (!missionId || !cmd) {
+    res.status(409).json({ error: 'no active mission' });
+    return;
+  }
+  const body = req.body as { code?: string; state?: string; callbackUrl?: string };
+  const result = await exchangeOAuthCode(missionId, req.params.id, body, cmd.arsenal.getScope());
+  res.status(result.ok ? 200 : 400).json(oauthActionBody(result));
+});
+
+app.get('/api/mission/oauth/import', (_req: Request, res: Response) => {
+  const cmd = getTempestCommand();
+  const view = cmd?.getSurfaceView() ?? null;
+  if (!view) {
+    res.json({ suggestions: [] });
+    return;
+  }
+  const sourceOrigin = view.stats.origins?.[0];
+  const suggestions = importOAuthFromOpenApi(view.snapshot.securitySchemes, sourceOrigin);
+  res.json(oauthImportBody(suggestions));
+});
+
 // =============================================================================
 // OP GENERAL — AUTONOMOUS OPERATION ORCHESTRATOR
 // =============================================================================
@@ -7495,6 +7625,10 @@ function bringUpMissionFromPlan(
   objective?: { objectiveClass?: import('./types/index.js').MissionObjectiveClass; objectiveDirective?: string; missionFamily?: import('./types/index.js').MissionFamily },
 ): { spawnedOps: Array<{ id: string; callsign: string; archetype: string }>; status: any } {
   const cmd = createTempestCommandInstance(execConfig.missionName, generalConfig.apiKey, generalConfig.provider, generalConfig.model, generalConfig.baseUrl, objective);
+  if (pendingLaunchPrincipals?.length) {
+    cmd.setPendingPrincipals(pendingLaunchPrincipals);
+    pendingLaunchPrincipals = null;
+  }
   for (const target of execConfig.targets) {
     if (target.startsWith('http://') || target.startsWith('https://')) cmd.targetEnv.addTarget(createTargetFromUrl(target));
     else if (/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/.test(target)) cmd.targetEnv.addTarget(createTargetFromIP(target));
@@ -7859,6 +7993,16 @@ app.post('/api/general/execute', async (req: Request, res: Response): Promise<vo
     if (execHeaderNames.length) {
       broadcastEvent('general:target_headers', { origin: hostFromTarget(headerTarget), headerNames: execHeaderNames });
     }
+    const execPrincipals = (req.body as { principals?: unknown }).principals;
+    if (execPrincipals !== undefined && execPrincipals !== null) {
+      const validated = validatePrincipalWrites(execPrincipals);
+      if (!validated.ok) {
+        clearRuntimeTargetHeaders();
+        res.status(400).json({ error: validated.error });
+        return;
+      }
+      pendingLaunchPrincipals = validated.writes;
+    }
 
     // Create TempestCommand instance from the plan. An explicit objectiveClass body field is
     // structural operator intent and wins over text detection (absent => heuristic on objectives).
@@ -7875,6 +8019,11 @@ app.post('/api/general/execute', async (req: Request, res: Response): Promise<vo
         allowFullRangeScans: (req.body as Record<string, unknown>).allowFullRangeScans === true ? true : undefined,
       }
     );
+
+    if (pendingLaunchPrincipals?.length) {
+      cmd.setPendingPrincipals(pendingLaunchPrincipals);
+      pendingLaunchPrincipals = null;
+    }
 
     // Add targets from the plan
     for (const target of execConfig.targets) {
@@ -8318,10 +8467,26 @@ app.post('/api/admiral/launch', async (req: Request, res: Response): Promise<voi
       directive.scopeHints = [directive.scopeHints, `Authenticated target headers supplied (names only, values redacted): ${headerNames.join(', ')}`].filter(Boolean).join(' — ');
     }
 
+    const principalsRaw = (req.body as { principals?: unknown }).principals;
+    if (principalsRaw !== undefined && principalsRaw !== null) {
+      const validated = validatePrincipalWrites(principalsRaw);
+      if (!validated.ok) {
+        clearRuntimeTargetHeaders();
+        res.status(400).json({ error: validated.error });
+        return;
+      }
+      pendingLaunchPrincipals = validated.writes;
+      const labels = validated.writes.map((p) => p.label).filter(Boolean);
+      if (labels.length) {
+        directive.scopeHints = [directive.scopeHints, `Principals supplied (labels only): ${labels.join(', ')}`].filter(Boolean).join(' — ');
+      }
+    }
+
     if (live && !confirmed) {
       // Preview/authorization gate reached without a live confirmation — no mission runs, so don't
       // leave a header binding armed on the shared runtime slot.
       clearRuntimeTargetHeaders();
+      pendingLaunchPrincipals = null;
       res.status(409).json({ error: 'LIVE launch requires confirmed=true (authorization gate)', directive });
       return;
     }
@@ -8340,7 +8505,7 @@ app.post('/api/admiral/launch', async (req: Request, res: Response): Promise<voi
         `Admiral LIVE launch: ${brief.objective}`);
       // Approval still pending — nothing launches yet, so don't leave headers armed; the approved
       // retry carries targetHeaders again and re-binds them.
-      if (!guard.allowed) { clearRuntimeTargetHeaders(); blockForApproval(res, guard); return; }
+      if (!guard.allowed) { clearRuntimeTargetHeaders(); pendingLaunchPrincipals = null; blockForApproval(res, guard); return; }
     }
 
     const generalLLM = new LLMBackbone(generalConfig);
@@ -8359,6 +8524,7 @@ app.post('/api/admiral/launch', async (req: Request, res: Response): Promise<voi
       // DRY-RUN: plan only, no mission, no packets, no claimed findings. Don't arm headers for a
       // preview; report only the safe header NAMES so the operator can confirm what will be sent.
       clearRuntimeTargetHeaders();
+      pendingLaunchPrincipals = null;
       res.json({ mode: 'dry_run', plan, directive, objectiveClass, authenticatedHeaderNames: headerNames, note: 'Plan only — no packets sent, no findings claimed.' });
       return;
     }
@@ -8703,6 +8869,7 @@ async function startServer() {
     if (shuttingDown) return;
     shuttingDown = true;
     console.log(`[T3MP3ST] ${signal} received — flushing state, shutting down…`);
+    teardownAuthRuntime();
     void flushPersist().catch(() => { /* best-effort */ }).finally(() => process.exit(0));
   };
   process.once('SIGTERM', flushAndExit);

@@ -260,8 +260,8 @@ describe('auth-context metadata naming — headerCount is not principalCount', (
       serverSource.indexOf('function liveObjectiveBlock'),
       serverSource.indexOf('function snapshotObjectiveBlock'),
     );
-    expect(live).toContain('headerCount: auth.headerNames.length');
-    expect(live).toContain('principalCount: auth.present ? 1 : 0');
+    expect(live).toContain('headerCount: auth.headerCount');
+    expect(live).toContain('principalCount: auth.principalCount');
     expect(live).not.toContain('count: auth.headerNames.length,');
     const snapshotBlock = serverSource.slice(
       serverSource.indexOf('function snapshotObjectiveBlock'),
@@ -277,10 +277,10 @@ describe('auth-context metadata naming — headerCount is not principalCount', (
       serverSource.indexOf('function recordTerminalMissionSnapshot'),
       serverSource.indexOf('function materializeBlockedPrerequisite'),
     );
-    expect(builder).toContain('headerCount: auth.headerNames.length');
-    expect(builder).toContain('principalCount: auth.present ? 1 : 0');
+    expect(builder).toContain('headerCount: auth.headerCount');
+    expect(builder).toContain('principalCount: auth.principalCount');
     // Secrets invariant: the builder still touches header NAMES only.
-    expect(builder).toContain('runtimeTargetHeaderMetadata');
+    expect(builder).toContain('snapshotAuthContext');
     expect(builder).not.toContain('headers.values()');
   });
 });

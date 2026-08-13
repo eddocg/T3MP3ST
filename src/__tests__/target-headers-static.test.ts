@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'fs';
 import { join } from 'path';
+import vm from 'node:vm';
 import { Arsenal, BUILTIN_TOOLS, createToolContext, setRuntimeTargetHeaders, clearRuntimeTargetHeaders } from '../arsenal/index.js';
 
 const httpTool = BUILTIN_TOOLS.find(tool => tool.name === 'http_request');
@@ -264,7 +265,8 @@ describe('runtime target-header wiring (server + UI, static)', () => {
     const launch = serverSource.slice(serverSource.indexOf("app.post('/api/admiral/launch'"), serverSource.indexOf('// BOUNTY PLATFORM INTEGRATIONS'));
     expect(launch).toMatch(/bindMissionTargetHeaders\(req\.body[^)]*, brief\.target\)/);
     expect(launch).toMatch(/if \(headerNames === null\)/);
-    expect(launch).toMatch(/clearRuntimeTargetHeaders\(\);\s*blockForApproval/);
+    expect(launch).toMatch(/clearRuntimeTargetHeaders\(\);/);
+    expect(launch).toMatch(/blockForApproval/);
     const execute = serverSource.slice(serverSource.indexOf("app.post('/api/general/execute'"), serverSource.indexOf("app.post('/api/general/auto'"));
     expect(execute).toMatch(/bindMissionTargetHeaders\(req\.body[^)]*, headerTarget\)/);
     expect(execute).toMatch(/clearRuntimeTargetHeaders\(\);\s*blockForApproval/);
@@ -287,5 +289,113 @@ describe('runtime target-header wiring (server + UI, static)', () => {
     expect(uiSource).toMatch(/function _admHeaders\(\)/);
     expect(uiSource).toMatch(/\{ targetHeaders: v\.headers \}/);
     expect(uiSource).toMatch(/Object\.assign\(\{ brief: brief, confirmed: true \}, bb, _admHeaders\(\)/);
+  });
+
+  it('Guided Hunt Authentication & Principals is web-only, write-only secrets, and launch-wired', () => {
+    expect(uiSource).toContain('Authentication &amp; Principals');
+    expect(uiSource).toContain('admiralSetPrincipalMode');
+    expect(uiSource).toContain("{id:'none'");
+    expect(uiSource).toContain("{id:'single'");
+    expect(uiSource).toContain("{id:'multiple'");
+    expect(uiSource).toContain('+ Add Principal');
+    expect(uiSource).toContain('value set (write-only)');
+    expect(uiSource).toMatch(/function _admPrincipals\(\)/);
+    expect(uiSource).toContain('_admPrincipals()');
+    expect(uiSource).toContain('(secrets not shown)');
+    expect(uiSource).toContain("type=\"password\"");
+    expect(uiSource).not.toMatch(/step===4[\s\S]{0,800}p\.token/);
+    expect(uiSource).not.toContain('esc(S.headers)');
+    expect(uiSource).not.toContain('esc(p.headersJson)');
+    expect(uiSource).not.toContain('esc(p.cookiesJson)');
+    expect(uiSource).not.toContain('esc(p.token)');
+    expect(uiSource).not.toContain('esc(p.apiKey)');
+    expect(uiSource).not.toContain('esc(p.password)');
+    expect(uiSource).not.toContain('esc(p.clientSecret)');
+    expect(uiSource).toContain('admiralDisposeBoundSecrets()');
+  });
+});
+
+function extractFunction(source: string, name: string): string {
+  const start = source.indexOf(`function ${name}(`);
+  if (start < 0) throw new Error(`missing ${name}`);
+  const brace = source.indexOf('{', start);
+  let depth = 0;
+  for (let i = brace; i < source.length; i++) {
+    if (source[i] === '{') depth++;
+    else if (source[i] === '}') {
+      depth--;
+      if (depth === 0) return source.slice(start, i + 1);
+    }
+  }
+  throw new Error(`unclosed ${name}`);
+}
+
+describe('Guided Hunt JS-state secret disposal', () => {
+  const uiSource = readFileSync(join(process.cwd(), 'docs/index.html'), 'utf8');
+
+  it('successful-launch disposal clears wizard secrets and preview stays metadata-only', () => {
+    const headerSecret = '{"Authorization":"Bearer wizard-header-secret-zzzzzz"}';
+    const cookieSecret = '{"sid":"wizard-cookie-secret-zzzzzz"}';
+    const tokenSecret = 'wizard-bearer-secret-zzzzzz';
+    const sandbox = {
+      S: {
+        headers: headerSecret,
+        principals: [{
+          label: 'Admin',
+          authType: 'custom_headers',
+          default: true,
+          headersJson: headerSecret,
+          cookiesJson: cookieSecret,
+          token: tokenSecret,
+          apiKey: 'wizard-apikey-secret-zzzzzz',
+          password: 'wizard-password-secret-zzzz',
+          clientSecret: 'wizard-client-secret-zzzzzz',
+        }],
+      },
+      window: {} as { admiralDisposeBoundSecrets?: () => void; admiralPrincipalPreview?: () => string },
+    };
+    vm.runInNewContext(
+      `${extractFunction(uiSource, 'admiralDisposeBoundSecrets')}\n`
+      + `${extractFunction(uiSource, 'admiralPrincipalPreview')}\n`
+      + 'window.admiralDisposeBoundSecrets = admiralDisposeBoundSecrets;\n'
+      + 'window.admiralPrincipalPreview = admiralPrincipalPreview;\n'
+      + 'admiralDisposeBoundSecrets();',
+      sandbox,
+    );
+    expect(sandbox.S.headers).toBe('');
+    expect(sandbox.S.principals[0].headersJson).toBe('');
+    expect(sandbox.S.principals[0].cookiesJson).toBe('');
+    expect(sandbox.S.principals[0].token).toBe('');
+    expect(sandbox.S.principals[0].apiKey).toBe('');
+    expect(sandbox.S.principals[0].password).toBe('');
+    expect(sandbox.S.principals[0].clientSecret).toBe('');
+    const serialized = JSON.stringify(sandbox.S);
+    expect(serialized).not.toContain('wizard-header-secret-zzzzzz');
+    expect(serialized).not.toContain('wizard-cookie-secret-zzzzzz');
+    expect(serialized).not.toContain('wizard-bearer-secret-zzzzzz');
+    expect(serialized).not.toContain('wizard-apikey-secret-zzzzzz');
+    expect(serialized).not.toContain('wizard-password-secret-zzzz');
+    expect(serialized).not.toContain('wizard-client-secret-zzzzzz');
+    const preview = sandbox.window.admiralPrincipalPreview!();
+    expect(preview).toBe('Admin (custom_headers, default)');
+    expect(preview).not.toContain('secret');
+    expect(preview).not.toContain('Bearer');
+    const headerPlaceholder = sandbox.S.headers ? 'value set (write-only)' : '{"Authorization":"Bearer <token>"}';
+    expect(headerPlaceholder).not.toContain('wizard-header-secret-zzzzzz');
+    const customPlaceholder = sandbox.S.principals[0].headersJson ? 'value set (write-only)' : '{}';
+    expect(customPlaceholder).toBe('{}');
+    const cookiePlaceholder = sandbox.S.principals[0].cookiesJson ? 'value set (write-only)' : '{}';
+    expect(cookiePlaceholder).toBe('{}');
+  });
+
+  it('launch success path disposes secrets only after a successful live launch', () => {
+    const start = uiSource.indexOf('window.admiralLaunch = async function');
+    const disposeAt = uiSource.indexOf('admiralDisposeBoundSecrets();', start);
+    expect(start).toBeGreaterThan(0);
+    expect(disposeAt).toBeGreaterThan(start);
+    const launch = uiSource.slice(start, disposeAt + 'admiralDisposeBoundSecrets();'.length);
+    const successGuard = launch.lastIndexOf('if (!res.ok || d.error)');
+    expect(successGuard).toBeGreaterThan(0);
+    expect(successGuard).toBeLessThan(launch.indexOf('admiralDisposeBoundSecrets();'));
   });
 });

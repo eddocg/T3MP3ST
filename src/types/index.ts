@@ -272,6 +272,10 @@ export interface Finding {
    * or authorization succeeded. Absent/undefined = unknown.
    */
   authContextApplied?: boolean;
+  /** Principal id attached for this request, if any. Never a secret. */
+  principalId?: string;
+  authMode?: 'inherit' | 'none';
+  authStatusAtRequest?: 'unknown' | 'live' | 'stale' | 'refreshing' | 'failed';
   /**
    * Deterministic evidence-vs-claim support assessment (see evidence/classification.ts). Present
    * once the claim has been evaluated. `supportLevel` is the gate's verdict on whether the
@@ -687,6 +691,10 @@ export interface ToolFinding {
   observationClass?: 'observation' | 'vulnerability';
   /** Provenance: were configured credential headers applied to the request? (Not "auth succeeded".) */
   authContextApplied?: boolean;
+  /** Principal id attached for this request, if any. Never a secret. */
+  principalId?: string;
+  authMode?: 'inherit' | 'none';
+  authStatusAtRequest?: 'unknown' | 'live' | 'stale' | 'refreshing' | 'failed';
 }
 
 export interface ToolResult {

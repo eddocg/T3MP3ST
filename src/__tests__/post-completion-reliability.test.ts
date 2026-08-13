@@ -912,22 +912,20 @@ describe('P4 — authMode public contract', () => {
     }
   });
 
-  it('an unknown authMode surfaces as an explicit validation error through Arsenal.execute (curl_request)', async () => {
+  it('an unknown authMode surfaces as a returned validation payload through Arsenal.execute (curl_request)', async () => {
     const { Arsenal, EXTERNAL_TOOLS, createToolContext } = await import('../arsenal/index.js');
     const arsenal = new Arsenal();
     arsenal.register(EXTERNAL_TOOLS.find((t) => t.name === 'curl_request')!);
-    let threw: any = null;
-    try {
-      await arsenal.execute('curl_request', createToolContext(undefined, {
-        url: 'https://api.example.test/',
-        authMode: 'suppressed', // observed in the wild — must NOT silently become inherit/none
-      }));
-    } catch (e) { threw = e; }
-    expect(threw).toBeTruthy();
-    expect(threw.category).toBe('validation_error');
-    // No credential material in the error — only the offending (non-secret) mode token.
-    expect(String(threw.message)).toContain('suppressed');
-    expect(String(threw.message)).toContain('inherit');
+    const result = await arsenal.execute('curl_request', createToolContext(undefined, {
+      url: 'https://api.example.test/',
+      authMode: 'suppressed', // observed in the wild — must NOT silently become inherit/none
+    }));
+    expect(result.success).toBe(false);
+    const payload = JSON.parse(result.error!);
+    expect(payload.code).toBe('invalid_auth_mode');
+    expect(payload.allowedValues).toEqual(['inherit', 'none']);
+    expect(payload.message).toContain('inherit');
+    expect(JSON.stringify(payload)).not.toMatch(/Bearer |password=/i);
   });
 
   it('cors_check output never labels a configuration-only observation CRITICAL', () => {

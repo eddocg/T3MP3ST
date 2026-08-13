@@ -65,7 +65,7 @@ function spec3(): Record<string, unknown> {
     components: {
       securitySchemes: {
         ApiKeyAuth: { type: 'apiKey', in: 'header', name: 'X-API-Key' },
-        OAuth2: { type: 'oauth2', flows: { authorizationCode: { scopes: { 'things:write': 'write things', 'things:read': 'read things' } } } },
+        OAuth2: { type: 'oauth2', flows: { authorizationCode: { authorizationUrl: 'https://login.example/authorize', tokenUrl: 'https://login.example/token', scopes: { 'things:write': 'write things', 'things:read': 'read things' } } } },
       },
     },
   };
@@ -155,6 +155,8 @@ describe('P1A parseOpenApi — OpenAPI 3.x JSON semantics', () => {
     expect(oauth.type).toBe('oauth2');
     expect(oauth.flows).toContain('authorizationCode');
     expect(oauth.scopes).toEqual(expect.arrayContaining(['things:write', 'things:read']));
+    expect(oauth.authorizationUrl).toBe('https://login.example/authorize');
+    expect(oauth.tokenUrl).toBe('https://login.example/token');
   });
 
   it('records declared servers as metadata only (redacting userinfo secrets)', () => {
