@@ -27369,7 +27369,7 @@ Be specific and actionable. Format as structured JSON.`;
       ['client_secret_basic','client_secret_basic (basic)'],
       ['client_secret_post','client_secret_post (body)'],
     ];
-    let html = '<select data-pk="flow" onchange="admiralPatchPrincipal('+i+',this);render();" style="'+inp+'">'
+    let html = '<select data-pk="flow" onchange="admiralSetOAuthGrant('+i+',this)" style="'+inp+'">'
       + grants.map(function(f){ return '<option value="'+f[0]+'"'+(grant===f[0]?' selected':'')+'>'+f[1]+'</option>'; }).join('')
       + '</select>';
     if (grant==='password') html += '<div style="font-size:10.5px;color:#f6c;margin-bottom:8px;line-height:1.4;">LEGACY OAUTH FLOW — supported for interoperability; not recommended for new deployments.</div>';
@@ -27380,16 +27380,16 @@ Be specific and actionable. Format as structured JSON.`;
     if (grant==='authorization_code' || grant==='authorization_code_pkce') {
       html += _admIn('authorizationUrl', i, 'authorizationUrl', p.authorizationUrl);
       html += _admIn('redirectUri', i, 'redirectUri', p.redirectUri);
-      html += '<label style="display:flex;gap:6px;align-items:center;font-size:11px;color:#bcd;margin-bottom:8px;"><input type="checkbox" '+(p.pkce || grant==='authorization_code_pkce'?'checked':'')+' onchange="S.principals['+i+'].pkce=this.checked"> PKCE S256</label>';
+      html += '<label style="display:flex;gap:6px;align-items:center;font-size:11px;color:#bcd;margin-bottom:8px;"><input type="checkbox" data-pk="pkce" '+(p.pkce || grant==='authorization_code_pkce'?'checked':'')+' onchange="admiralPatchPrincipal('+i+',this)"> PKCE S256</label>';
     }
     html += _admIn('refreshUrl', i, 'refreshUrl (optional)', p.refreshUrl);
     html += _admIn('clientId', i, 'clientId', p.clientId);
     html += _admIn('clientSecret', i, secretPlaceholder(!!p.clientSecret), p.clientSecret, 'password');
-    html += '<label style="display:flex;gap:6px;align-items:center;font-size:11px;color:#bcd;margin-bottom:8px;"><input type="checkbox" '+(p.clearClientSecret?'checked':'')+' onchange="S.principals['+i+'].clearClientSecret=this.checked"> Clear stored client secret</label>';
+    html += '<label style="display:flex;gap:6px;align-items:center;font-size:11px;color:#bcd;margin-bottom:8px;"><input type="checkbox" data-pk="clearClientSecret" '+(p.clearClientSecret?'checked':'')+' onchange="admiralPatchPrincipal('+i+',this)"> Clear stored client secret</label>';
     if (grant==='password') {
       html += _admIn('username', i, 'username', p.username);
       html += _admIn('password', i, secretPlaceholder(!!p.password), p.password, 'password');
-      html += '<label style="display:flex;gap:6px;align-items:center;font-size:11px;color:#bcd;margin-bottom:8px;"><input type="checkbox" '+(p.clearPassword?'checked':'')+' onchange="S.principals['+i+'].clearPassword=this.checked"> Clear stored password</label>';
+      html += '<label style="display:flex;gap:6px;align-items:center;font-size:11px;color:#bcd;margin-bottom:8px;"><input type="checkbox" data-pk="clearPassword" '+(p.clearPassword?'checked':'')+' onchange="admiralPatchPrincipal('+i+',this)"> Clear stored password</label>';
     }
     html += _admIn('scopes', i, 'scopes (space-separated)', p.scopes);
     html += _admIn('resource', i, 'resource indicators (space-separated, 0..N; never inferred from hostname)', p.resource);
@@ -27398,7 +27398,7 @@ Be specific and actionable. Format as structured JSON.`;
       html += _admIn('extensionGrantType', i, 'extension grant_type URN', p.extensionGrantType);
       html += '<textarea data-pk="safeParamsJson" oninput="admiralPatchPrincipal('+i+',this)" placeholder="safeParams JSON object" style="width:100%;min-height:48px;box-sizing:border-box;margin-bottom:6px;padding:8px;font-size:11px;background:rgba(0,0,0,0.45);border:1px solid rgba(0,200,255,0.25);border-radius:6px;color:#e8f0f3;font-family:\'JetBrains Mono\',monospace;">'+esc(p.safeParamsJson||'')+'</textarea>';
       html += '<textarea data-pk="secretParamsJson" oninput="admiralPatchPrincipal('+i+',this)" placeholder="'+(p.secretParamsJson ? 'value set (write-only)' : 'secretParams JSON object')+'" style="width:100%;min-height:48px;box-sizing:border-box;margin-bottom:6px;padding:8px;font-size:11px;background:rgba(0,0,0,0.45);border:1px solid rgba(0,200,255,0.25);border-radius:6px;color:#e8f0f3;font-family:\'JetBrains Mono\',monospace;"></textarea>';
-      html += '<label style="display:flex;gap:6px;align-items:center;font-size:11px;color:#bcd;margin-bottom:8px;"><input type="checkbox" '+(p.clearSecretParams?'checked':'')+' onchange="S.principals['+i+'].clearSecretParams=this.checked"> Clear stored secret params</label>';
+      html += '<label style="display:flex;gap:6px;align-items:center;font-size:11px;color:#bcd;margin-bottom:8px;"><input type="checkbox" data-pk="clearSecretParams" '+(p.clearSecretParams?'checked':'')+' onchange="admiralPatchPrincipal('+i+',this)"> Clear stored secret params</label>';
       html += '<select data-pk="renewalPolicy" onchange="admiralPatchPrincipal('+i+',this)" style="'+inp+'">'
         + [['repeat_grant','renewal: repeat_grant'],['interactive','renewal: interactive'],['never','renewal: never']].map(function(r){ return '<option value="'+r[0]+'"'+((p.renewalPolicy||'repeat_grant')===r[0]?' selected':'')+'>'+r[1]+'</option>'; }).join('')
         + '</select>';
@@ -27438,7 +27438,7 @@ Be specific and actionable. Format as structured JSON.`;
       + '<input data-pk="roleHint" value="'+esc(p.roleHint||'')+'" placeholder="Role hint (operator metadata only)" oninput="admiralPatchPrincipal('+i+',this)" style="width:100%;box-sizing:border-box;margin-bottom:6px;padding:8px;font-size:12px;background:rgba(0,0,0,0.45);border:1px solid rgba(0,200,255,0.25);border-radius:6px;color:#e8f0f3;">'
       + '<input data-pk="origin" value="'+esc(p.origin||_admOrigin())+'" placeholder="https://api.example" oninput="admiralPatchPrincipal('+i+',this)" style="width:100%;box-sizing:border-box;margin-bottom:6px;padding:8px;font-size:12px;background:rgba(0,0,0,0.45);border:1px solid rgba(0,200,255,0.25);border-radius:6px;color:#e8f0f3;">'
       + '<label style="display:flex;gap:6px;align-items:center;font-size:11px;color:#bcd;margin-bottom:8px;"><input type="checkbox" '+(p.default?'checked':'')+' onchange="admiralSetDefaultPrincipal('+i+',this.checked)"> Default principal</label>'
-      + '<select data-pk="authType" onchange="admiralPatchPrincipal('+i+',this);render();" style="width:100%;margin-bottom:8px;padding:8px;background:rgba(0,0,0,0.45);border:1px solid rgba(0,200,255,0.25);border-radius:6px;color:#e8f0f3;">'
+      + '<select data-pk="authType" onchange="admiralSetPrincipalAuthType('+i+',this)" style="width:100%;margin-bottom:8px;padding:8px;background:rgba(0,0,0,0.45);border:1px solid rgba(0,200,255,0.25);border-radius:6px;color:#e8f0f3;">'
       + types.map(function(t){ return '<option value="'+t[0]+'"'+(p.authType===t[0]?' selected':'')+'>'+t[1]+'</option>'; }).join('')
       + '</select>'+fields+'</div>';
   }
@@ -27459,6 +27459,14 @@ Be specific and actionable. Format as structured JSON.`;
     const k = el.getAttribute('data-pk'); if(!k || !S.principals[i]) return;
     if ((k==='headersJson' || k==='cookiesJson' || k==='token' || k==='apiKey' || k==='password' || k==='clientSecret' || k==='secretParamsJson') && !el.value) return;
     S.principals[i][k] = el.type==='checkbox' ? !!el.checked : el.value;
+  };
+  window.admiralSetPrincipalAuthType = function(i, el){
+    admiralPatchPrincipal(i, el);
+    render();
+  };
+  window.admiralSetOAuthGrant = function(i, el){
+    admiralPatchPrincipal(i, el);
+    render();
   };
   function admiralDisposeBoundSecrets(){
     S.headers = '';

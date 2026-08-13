@@ -4,6 +4,7 @@ import { join } from 'path';
 import { createServer } from 'node:http';
 import { request as httpRequest } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import vm from 'node:vm';
 import { Arsenal, BUILTIN_TOOLS, createToolContext, clearRuntimeTargetHeaders } from '../arsenal/index.js';
 import {
   putPrincipals,
@@ -685,6 +686,88 @@ describe('P2B.1 full HTTP DTO round-trip', () => {
   });
 });
 
+function extractNamedFunction(source: string, name: string): string {
+  const start = source.indexOf(`function ${name}(`);
+  if (start < 0) throw new Error(`missing ${name}`);
+  const brace = source.indexOf('{', start);
+  let depth = 0;
+  for (let i = brace; i < source.length; i++) {
+    if (source[i] === '{') depth++;
+    else if (source[i] === '}') {
+      depth--;
+      if (depth === 0) return source.slice(start, i + 1);
+    }
+  }
+  throw new Error(`unclosed ${name}`);
+}
+
+function extractWindowFunction(source: string, name: string): string {
+  const start = source.indexOf(`window.${name} = function`);
+  if (start < 0) throw new Error(`missing window.${name}`);
+  const brace = source.indexOf('{', start);
+  let depth = 0;
+  for (let i = brace; i < source.length; i++) {
+    if (source[i] === '{') depth++;
+    else if (source[i] === '}') {
+      depth--;
+      if (depth === 0) return source.slice(start, i + 1) + ';';
+    }
+  }
+  throw new Error(`unclosed window.${name}`);
+}
+
+function selectEl(pk: string, value: string) {
+  return { getAttribute: (k: string) => (k === 'data-pk' ? pk : null), type: 'select-one', value };
+}
+
+function assertNoDirectInlineRender(html: string) {
+  expect(html).not.toMatch(/\bon(?:change|click|input)\s*=\s*"[^"]*\brender\s*\(/);
+  expect(html).not.toContain(';render();');
+}
+
+type PrincipalUiSandbox = {
+  S: { principals: Array<Record<string, unknown>> };
+  window: Record<string, (...args: unknown[]) => void>;
+  admiralPrincipalCard: (p: Record<string, unknown>, i: number, mode: string) => string;
+};
+
+function loadPrincipalUi(principal: Record<string, unknown>) {
+  const ui = readFileSync(join(process.cwd(), 'docs/index.html'), 'utf8');
+  const admiralSrc = ui.slice(ui.indexOf('// ═══════════ ⚓ OP ADMIRAL'));
+  const renderState = { calls: 0 };
+  const sandbox: Record<string, unknown> = {
+    S: { target: 'https://api.example', principals: [principal] },
+    window: {},
+    URL,
+    render: () => { renderState.calls += 1; },
+  };
+  vm.runInNewContext(
+    [
+      extractNamedFunction(admiralSrc, 'esc'),
+      extractNamedFunction(admiralSrc, '_admOrigin'),
+      extractNamedFunction(admiralSrc, 'secretPlaceholder'),
+      extractNamedFunction(admiralSrc, '_admIn'),
+      extractNamedFunction(admiralSrc, 'admiralOAuthFields'),
+      extractNamedFunction(admiralSrc, 'admiralPrincipalCard'),
+      extractWindowFunction(admiralSrc, 'admiralPatchPrincipal'),
+      extractWindowFunction(admiralSrc, 'admiralSetPrincipalAuthType'),
+      extractWindowFunction(admiralSrc, 'admiralSetOAuthGrant'),
+      'admiralPatchPrincipal = window.admiralPatchPrincipal;',
+      'admiralSetPrincipalAuthType = window.admiralSetPrincipalAuthType;',
+      'admiralSetOAuthGrant = window.admiralSetOAuthGrant;',
+    ].join('\n'),
+    sandbox,
+  );
+  const ctx = sandbox as unknown as PrincipalUiSandbox;
+  return {
+    sandbox: ctx,
+    renderState,
+    card() {
+      return ctx.admiralPrincipalCard(ctx.S.principals[0], 0, 'single');
+    },
+  };
+}
+
 describe('P2B.1 UI + source invariants', () => {
   it('Guided Hunt exposes password LEGACY, clientAuth none, and omit-vs-clear', () => {
     const ui = readFileSync(join(process.cwd(), 'docs/index.html'), 'utf8');
@@ -695,6 +778,127 @@ describe('P2B.1 UI + source invariants', () => {
     expect(ui).toContain('Provide callback / code+state');
     expect(ui).toContain('Discover Metadata');
     expect(ui).not.toMatch(/danalock/i);
+  });
+
+  it('auth/grant selects use dedicated window handlers, not inline render()', () => {
+    const ui = readFileSync(join(process.cwd(), 'docs/index.html'), 'utf8');
+    const admiralSrc = ui.slice(ui.indexOf('// ═══════════ ⚓ OP ADMIRAL'));
+    expect(admiralSrc).toContain('window.admiralSetPrincipalAuthType');
+    expect(admiralSrc).toContain('window.admiralSetOAuthGrant');
+    expect(admiralSrc).toContain("onchange=\"admiralSetPrincipalAuthType('+i+',this)\"");
+    expect(admiralSrc).toContain("onchange=\"admiralSetOAuthGrant('+i+',this)\"");
+    expect(admiralSrc).not.toContain("admiralPatchPrincipal('+i+',this);render();");
+    expect(admiralSrc).not.toMatch(/\bonchange="[^"]*;render\(\)/);
+    expect(admiralSrc).not.toMatch(/window\.render\s*=/);
+  });
+
+  it('custom_headers -> OAuth2 patches state, re-renders, and swaps principal fields', () => {
+    const ui = loadPrincipalUi({
+      label: 'p1',
+      origin: 'https://api.example',
+      authType: 'custom_headers',
+      headersJson: '',
+      flow: 'client_credentials',
+      tokenUrl: '',
+    });
+    const before = ui.card();
+    expect(before).toContain('data-pk="headersJson"');
+    expect(before).toMatch(/placeholder="\{\}"/);
+    expect(before).not.toContain('data-pk="flow"');
+    expect(before).not.toContain('data-pk="tokenUrl"');
+    expect(before).toContain('admiralSetPrincipalAuthType(0,this)');
+    assertNoDirectInlineRender(before);
+
+    ui.sandbox.window.admiralSetPrincipalAuthType(0, selectEl('authType', 'oauth2'));
+    expect(ui.sandbox.S.principals[0].authType).toBe('oauth2');
+    expect(ui.renderState.calls).toBe(1);
+
+    const after = ui.card();
+    expect(after).toContain('data-pk="flow"');
+    expect(after).toContain('admiralSetOAuthGrant(0,this)');
+    expect(after).toContain('data-pk="tokenUrl"');
+    expect(after).not.toContain('data-pk="headersJson"');
+    expect(after).not.toMatch(/data-pk="headersJson"[\s\S]*placeholder="\{\}"/);
+    assertNoDirectInlineRender(after);
+  });
+
+  it('OAuth2 -> Basic shows HTTP Basic fields and drops OAuth fields', () => {
+    const ui = loadPrincipalUi({
+      label: 'p1',
+      origin: 'https://api.example',
+      authType: 'oauth2',
+      flow: 'client_credentials',
+      tokenUrl: 'https://api.example/token',
+    });
+    expect(ui.card()).toContain('data-pk="tokenUrl"');
+
+    ui.sandbox.window.admiralSetPrincipalAuthType(0, selectEl('authType', 'http_basic'));
+    expect(ui.sandbox.S.principals[0].authType).toBe('http_basic');
+    expect(ui.renderState.calls).toBe(1);
+
+    const after = ui.card();
+    expect(after).toContain('placeholder="Username"');
+    expect(after).toContain('data-pk="username"');
+    expect(after).toContain('data-pk="password"');
+    expect(after).toContain('type="password"');
+    expect(after).not.toContain('data-pk="flow"');
+    expect(after).not.toContain('data-pk="tokenUrl"');
+    expect(after).not.toContain('admiralSetOAuthGrant');
+    assertNoDirectInlineRender(after);
+  });
+
+  it('client_credentials -> password shows ROPC fields and LEGACY warning', () => {
+    const ui = loadPrincipalUi({
+      label: 'p1',
+      origin: 'https://api.example',
+      authType: 'oauth2',
+      flow: 'client_credentials',
+      tokenUrl: 'https://api.example/token',
+      username: '',
+      password: '',
+    });
+    const before = ui.card();
+    expect(before).not.toContain('color:#f6c');
+    expect(before).not.toContain('data-pk="username"');
+    expect(before).not.toContain('data-pk="password"');
+
+    ui.sandbox.window.admiralSetOAuthGrant(0, selectEl('flow', 'password'));
+    expect(ui.sandbox.S.principals[0].flow).toBe('password');
+    expect(ui.renderState.calls).toBe(1);
+
+    const after = ui.card();
+    expect(after).toContain('data-pk="username"');
+    expect(after).toContain('placeholder="username"');
+    expect(after).toContain('data-pk="password"');
+    expect(after).toContain('type="password"');
+    expect(after).toContain('color:#f6c');
+    expect(after).toContain('LEGACY OAUTH FLOW — supported for interoperability; not recommended for new deployments.');
+    assertNoDirectInlineRender(after);
+  });
+
+  it('password -> client_credentials drops username/password grant fields', () => {
+    const ui = loadPrincipalUi({
+      label: 'p1',
+      origin: 'https://api.example',
+      authType: 'oauth2',
+      flow: 'password',
+      tokenUrl: 'https://api.example/token',
+      username: 'alice',
+      password: '',
+    });
+    expect(ui.card()).toContain('data-pk="username"');
+
+    ui.sandbox.window.admiralSetOAuthGrant(0, selectEl('flow', 'client_credentials'));
+    expect(ui.sandbox.S.principals[0].flow).toBe('client_credentials');
+    expect(ui.renderState.calls).toBe(1);
+
+    const after = ui.card();
+    expect(after).not.toContain('data-pk="username"');
+    expect(after).not.toContain('data-pk="password"');
+    expect(after).not.toContain('color:#f6c');
+    expect(after).toContain('data-pk="tokenUrl"');
+    expect(after).toContain('data-pk="clientSecret"');
+    assertNoDirectInlineRender(after);
   });
 
   it('source has no Danalock-specific OAuth strings', () => {

@@ -312,6 +312,9 @@ describe('runtime target-header wiring (server + UI, static)', () => {
     expect(uiSource).not.toContain('esc(p.password)');
     expect(uiSource).not.toContain('esc(p.clientSecret)');
     expect(uiSource).toContain('admiralDisposeBoundSecrets()');
+    expect(uiSource).toContain('window.admiralSetPrincipalAuthType');
+    expect(uiSource).toContain('window.admiralSetOAuthGrant');
+    expect(uiSource).not.toContain("admiralPatchPrincipal('+i+',this);render();");
   });
 });
 
