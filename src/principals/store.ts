@@ -3,7 +3,7 @@
  * No process-global "active mission" auth selector.
  */
 
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { replaceRuntimeSecretSource, clearRuntimeSecretSource } from '../redact.js';
 import {
   FORBIDDEN_AUTH_HEADERS,
@@ -12,10 +12,21 @@ import {
   principalSecretSourceId,
   type AuthProfileWrite,
   type AuthValidationFailure,
+  type OAuth2AuthWrite,
   type PrincipalPublic,
   type PrincipalRuntimeStatus,
   type PrincipalWrite,
+  type WriteOnlySecret,
 } from './types.js';
+import { collidingReservedKeys } from './oauth/reserved.js';
+import { getClientAuth, getGrant, ensureOAuthAdaptersRegistered } from './oauth/registry.js';
+import {
+  normalizeResourceList,
+  publicGrantType,
+  resolvedClientAuth,
+  resolvedGrantType,
+  usesPkce,
+} from './oauth/normalize.js';
 
 export interface OAuthRuntimeMaterial {
   accessToken?: string;
@@ -30,7 +41,11 @@ export interface OAuthRuntimeMaterial {
   clientSecret?: string;
   acquireAttempts?: number;
   refreshAttempts?: number;
+  reacquireAttempts?: number;
   lastAttemptAt?: number;
+  refreshUnusable?: boolean;
+  lastErrorCode?: string;
+  grantRuntime?: Record<string, string>;
 }
 
 export interface StoredPrincipal {
@@ -43,6 +58,8 @@ export interface StoredPrincipal {
   runtimeStatus: PrincipalRuntimeStatus;
   lastStatusAt?: string;
   lastError?: string;
+  authConfigRevision: number;
+  publicConfigHash?: string;
   oauth?: OAuthRuntimeMaterial;
 }
 
@@ -54,6 +71,61 @@ interface MissionBucket {
 const missions = new Map<string, MissionBucket>();
 /** Rotated-out / dropped secrets stay registered until mission teardown. */
 const historicalSecrets = new Map<string, Set<string>>();
+
+function isOAuth(auth: AuthProfileWrite): auth is OAuth2AuthWrite {
+  return auth.type === 'oauth2';
+}
+
+function mergeWriteOnly(incoming: WriteOnlySecret, existing: string | undefined): { value: string | undefined; bumped: boolean } {
+  if (incoming === undefined) return { value: existing, bumped: false };
+  if (incoming === null) return { value: undefined, bumped: true };
+  if (incoming === '') return { value: existing, bumped: false };
+  return { value: incoming, bumped: true };
+}
+
+function mergeSecretMap(
+  incoming: Record<string, string> | null | undefined,
+  existing: Record<string, string> | undefined,
+): { value: Record<string, string> | undefined; bumped: boolean } {
+  if (incoming === undefined) return { value: existing, bumped: false };
+  if (incoming === null) return { value: undefined, bumped: true };
+  return { value: { ...incoming }, bumped: true };
+}
+
+function publicAuthFingerprint(origin: string, auth: OAuth2AuthWrite): string {
+  const payload = {
+    origin,
+    grantType: resolvedGrantType(auth),
+    tokenUrl: auth.tokenUrl || '',
+    authorizationUrl: auth.authorizationUrl || '',
+    refreshUrl: auth.refreshUrl || '',
+    clientId: auth.clientId || '',
+    clientAuth: resolvedClientAuth(auth),
+    username: auth.username || '',
+    scopes: [...(auth.scopes || [])].sort(),
+    resource: [...(auth.resource || [])].sort(),
+    audience: auth.audience || '',
+    redirectUri: auth.redirectUri || '',
+    pkce: usesPkce(auth),
+    proof: auth.proof || 'none',
+    extraTokenParams: auth.extraTokenParams || {},
+    extensionGrantType: auth.extensionGrantType || '',
+    safeParams: auth.safeParams || {},
+    renewalPolicy: auth.renewalPolicy || '',
+  };
+  return createHash('sha256').update(JSON.stringify(payload)).digest('hex');
+}
+
+function invalidateOauthRuntime(p: StoredPrincipal): void {
+  p.oauth = {
+    acquireAttempts: 0,
+    refreshAttempts: 0,
+    reacquireAttempts: 0,
+    lastAttemptAt: 0,
+  };
+  p.runtimeStatus = 'unknown';
+  p.lastError = '';
+}
 
 function collectSecrets(p: StoredPrincipal): string[] {
   const out: string[] = [];
@@ -67,14 +139,19 @@ function collectSecrets(p: StoredPrincipal): string[] {
     out.push(Buffer.from(`${auth.username}:${auth.password}`).toString('base64'));
   } else if (auth.type === 'cookie_session') out.push(...Object.values(auth.cookies));
   else if (auth.type === 'oauth2') {
-    if (auth.clientSecret) out.push(auth.clientSecret);
+    if (typeof auth.clientSecret === 'string') out.push(auth.clientSecret);
+    if (typeof auth.password === 'string') out.push(auth.password);
+    if (auth.secretParams) out.push(...Object.values(auth.secretParams));
     const o = p.oauth;
     if (o) {
       for (const v of [o.accessToken, o.refreshToken, o.authorizationCode, o.state, o.codeVerifier, o.clientSecret]) {
         if (v) out.push(v);
       }
+      if (o.grantRuntime) out.push(...Object.values(o.grantRuntime));
     }
-    if (auth.extraTokenParams) out.push(...Object.values(auth.extraTokenParams));
+    if (auth.extraTokenParams) {
+      // extraTokenParams are public token-affecting, not classified secrets
+    }
   }
   return out.filter(Boolean);
 }
@@ -83,7 +160,6 @@ function syncMissionSecrets(missionId: string): void {
   const bucket = missions.get(missionId);
   const source = principalSecretSourceId(missionId);
   if (!bucket || bucket.principals.size === 0) {
-    // Keep historical values registered until teardown so rotated tokens/codes stay redacted.
     const hist = historicalSecrets.get(missionId);
     if (hist && hist.size > 0) replaceRuntimeSecretSource(source, hist);
     else clearRuntimeSecretSource(source);
@@ -117,20 +193,37 @@ function cookieNamesOf(p: StoredPrincipal): string[] {
 }
 
 function toPublic(p: StoredPrincipal): PrincipalPublic {
+  ensureOAuthAdaptersRegistered();
   const oauthMeta = p.auth.type === 'oauth2'
-    ? {
-        flow: p.auth.flow,
-        authorizationUrl: p.auth.authorizationUrl,
-        tokenUrl: p.auth.tokenUrl,
-        refreshUrl: p.auth.refreshUrl,
-        clientId: p.auth.clientId,
-        audience: p.auth.audience,
-        redirectUri: p.auth.redirectUri,
-        tokenType: p.oauth?.tokenType,
-        expiresAt: p.oauth?.expiresAt ? new Date(p.oauth.expiresAt).toISOString() : undefined,
-        hasRefreshToken: !!p.oauth?.refreshToken,
-        scopes: (p.oauth?.scope && p.oauth.scope.length > 0) ? p.oauth.scope : p.auth.scopes,
-      }
+    ? (() => {
+        const grant = getGrant(resolvedGrantType(p.auth));
+        const client = getClientAuth(resolvedClientAuth(p.auth));
+        const projected = {
+          ...(grant?.projectPublic(p) || {}),
+          ...(client?.projectPublic(p) || {}),
+        };
+        return {
+          ...projected,
+          flow: publicGrantType(p.auth),
+          grantType: resolvedGrantType(p.auth),
+          clientAuth: resolvedClientAuth(p.auth),
+          authorizationUrl: p.auth.authorizationUrl,
+          tokenUrl: p.auth.tokenUrl,
+          refreshUrl: p.auth.refreshUrl,
+          clientId: p.auth.clientId,
+          audience: p.auth.audience,
+          redirectUri: p.auth.redirectUri,
+          tokenType: p.oauth?.tokenType,
+          expiresAt: p.oauth?.expiresAt ? new Date(p.oauth.expiresAt).toISOString() : undefined,
+          hasRefreshToken: !!p.oauth?.refreshToken,
+          scopes: (p.oauth?.scope && p.oauth.scope.length > 0) ? p.oauth.scope : p.auth.scopes,
+          resource: p.auth.resource?.length ? p.auth.resource : undefined,
+          renewalCapability: grant?.renewalCapability(p),
+          pkce: usesPkce(p.auth) || undefined,
+          renewalPolicy: p.auth.renewalPolicy,
+          extensionGrantType: p.auth.extensionGrantType,
+        };
+      })()
     : undefined;
   return {
     id: p.id,
@@ -144,8 +237,37 @@ function toPublic(p: StoredPrincipal): PrincipalPublic {
     cookieNames: cookieNamesOf(p),
     lastStatusAt: p.lastStatusAt,
     lastError: p.lastError,
+    lastErrorCode: p.oauth?.lastErrorCode,
+    authConfigRevision: p.authConfigRevision,
     oauth: oauthMeta,
   };
+}
+
+function validateOAuthWrite(auth: OAuth2AuthWrite): string | null {
+  ensureOAuthAdaptersRegistered();
+  if (typeof auth.tokenUrl !== 'string' || !auth.tokenUrl) return 'oauth2.tokenUrl is required';
+  const grantType = resolvedGrantType(auth);
+  if (!grantType) return 'oauth2.grantType is required';
+  const grant = getGrant(grantType);
+  if (!grant) return 'oauth_unsupported_grant';
+  const validated = grant.validate(auth as unknown as Record<string, unknown>);
+  if (!validated.ok) return validated.code;
+  const method = resolvedClientAuth(auth);
+  if (method === 'client_secret_jwt' || method === 'private_key_jwt' || method === 'tls_client_auth') {
+    return 'oauth_unsupported_client_auth';
+  }
+  const client = getClientAuth(method);
+  if (!client) return 'oauth_unsupported_client_auth';
+  const clientOk = client.validate(auth as unknown as Record<string, unknown>);
+  if (!clientOk.ok) return clientOk.code;
+  const collisions = collidingReservedKeys(
+    [auth.extraTokenParams, auth.safeParams, auth.secretParams && typeof auth.secretParams === 'object' ? auth.secretParams : undefined],
+    [...grant.reservedTokenParams(), ...client.reservedTokenParams()],
+  );
+  if (collisions.length) return 'oauth_reserved_parameter_collision';
+  if (auth.password === '') return 'oauth2.password empty string is not a clear; omit to preserve or pass null to clear';
+  if (auth.clientSecret === '') return 'oauth2.clientSecret empty string is not a clear; omit to preserve or pass null to clear';
+  return null;
 }
 
 function validateAuth(auth: AuthProfileWrite): string | null {
@@ -183,9 +305,7 @@ function validateAuth(auth: AuthProfileWrite): string | null {
       return null;
     }
     case 'oauth2':
-      if (!auth.flow) return 'oauth2.flow is required';
-      if (typeof auth.tokenUrl !== 'string' || !auth.tokenUrl) return 'oauth2.tokenUrl is required';
-      return null;
+      return validateOAuthWrite(auth);
     default:
       return 'unsupported auth type';
   }
@@ -194,6 +314,69 @@ function validateAuth(auth: AuthProfileWrite): string | null {
 function initialStatus(auth: AuthProfileWrite): PrincipalRuntimeStatus {
   if (auth.type === 'oauth2') return 'unknown';
   return 'live';
+}
+
+function normalizeOAuthWrite(auth: OAuth2AuthWrite, existing?: OAuth2AuthWrite): { auth: OAuth2AuthWrite; secretBumped: boolean } {
+  const clientSecret = mergeWriteOnly(auth.clientSecret, existing && typeof existing.clientSecret === 'string' ? existing.clientSecret : undefined);
+  const password = mergeWriteOnly(auth.password, existing && typeof existing.password === 'string' ? existing.password : undefined);
+  const secretParams = mergeSecretMap(
+    auth.secretParams,
+    existing?.secretParams && typeof existing.secretParams === 'object' ? existing.secretParams : undefined,
+  );
+  const grantType = resolvedGrantType(auth) || (existing ? resolvedGrantType(existing) : '');
+  const pkce = usesPkce(auth) || (grantType === 'authorization_code' && existing ? usesPkce(existing) : false);
+  const next: OAuth2AuthWrite = {
+    type: 'oauth2',
+    grantType,
+    flow: auth.flow || existing?.flow,
+    authorizationUrl: auth.authorizationUrl ?? existing?.authorizationUrl,
+    tokenUrl: auth.tokenUrl,
+    refreshUrl: auth.refreshUrl ?? existing?.refreshUrl,
+    clientId: auth.clientId ?? existing?.clientId,
+    clientSecret: clientSecret.value,
+    username: auth.username ?? existing?.username,
+    password: password.value,
+    scopes: auth.scopes ?? existing?.scopes,
+    resource: auth.resource !== undefined ? normalizeResourceList(auth.resource) : (existing?.resource || []),
+    audience: auth.audience ?? existing?.audience,
+    redirectUri: auth.redirectUri ?? existing?.redirectUri,
+    extraTokenParams: auth.extraTokenParams ?? existing?.extraTokenParams,
+    clientAuth: auth.clientAuth ?? existing?.clientAuth,
+    pkce: auth.pkce !== undefined ? auth.pkce : pkce,
+    proof: auth.proof ?? existing?.proof ?? 'none',
+    extensionGrantType: auth.extensionGrantType ?? existing?.extensionGrantType,
+    safeParams: auth.safeParams ?? existing?.safeParams,
+    secretParams: secretParams.value,
+    renewalPolicy: auth.renewalPolicy ?? existing?.renewalPolicy,
+  };
+  if (next.grantType === 'authorization_code_pkce') {
+    next.grantType = 'authorization_code';
+    next.pkce = true;
+  }
+  return { auth: next, secretBumped: clientSecret.bumped || password.bumped || secretParams.bumped };
+}
+
+function storedToWrite(p: StoredPrincipal): PrincipalWrite {
+  if (p.auth.type === 'oauth2') {
+    const { clientSecret: _c, password: _pw, secretParams: _s, ...rest } = p.auth;
+    void _c; void _pw; void _s;
+    return {
+      id: p.id,
+      label: p.label,
+      roleHint: p.roleHint,
+      origin: p.origin,
+      default: p.default,
+      auth: rest,
+    };
+  }
+  return {
+    id: p.id,
+    label: p.label,
+    roleHint: p.roleHint,
+    origin: p.origin,
+    default: p.default,
+    auth: p.auth,
+  };
 }
 
 /** Register extra runtime secrets (e.g. a submitted authorization code) into the mission source. */
@@ -220,27 +403,62 @@ export function putPrincipals(missionId: string, writes: PrincipalWrite[]): { ok
   }
   if (writes.length > MAX_PRINCIPALS_PER_MISSION) return { ok: false, error: `at most ${MAX_PRINCIPALS_PER_MISSION} principals per mission` };
 
+  const previous = missions.get(missionId);
   const next = new Map<string, StoredPrincipal>();
   let defaultId: string | undefined;
   for (const w of writes) {
     if (!w || typeof w.label !== 'string' || !w.label.trim()) return { ok: false, error: 'each principal needs a label' };
     const origin = normalizeHttpOrigin(w.origin);
     if (!origin) return { ok: false, error: 'each principal needs an exact http(s) origin' };
-    const authErr = validateAuth(w.auth);
+    const existing = (typeof w.id === 'string' && w.id.trim()) ? previous?.principals.get(w.id.trim()) : undefined;
+    let auth = w.auth;
+    let secretBumped = false;
+    if (auth.type === 'oauth2') {
+      const merged = normalizeOAuthWrite(auth, existing && isOAuth(existing.auth) ? existing.auth : undefined);
+      auth = merged.auth;
+      secretBumped = merged.secretBumped;
+    }
+    const authErr = validateAuth(auth);
     if (authErr === 'query_api_key_unsupported') return { ok: false, error: 'query_api_key_unsupported' };
     if (authErr) return { ok: false, error: authErr };
     const id = (typeof w.id === 'string' && w.id.trim()) ? w.id.trim() : `principal-${randomUUID().slice(0, 8)}`;
     if (next.has(id)) return { ok: false, error: `duplicate principal id ${id}` };
+
     const stored: StoredPrincipal = {
       id,
       label: w.label.trim(),
       roleHint: typeof w.roleHint === 'string' ? w.roleHint.trim() || undefined : undefined,
       origin,
       default: !!w.default,
-      auth: w.auth,
-      runtimeStatus: initialStatus(w.auth),
+      auth,
+      runtimeStatus: initialStatus(auth),
       lastStatusAt: new Date().toISOString(),
+      authConfigRevision: 1,
     };
+
+    if (auth.type === 'oauth2') {
+      const hash = publicAuthFingerprint(origin, auth);
+      stored.publicConfigHash = hash;
+      const prevSame = existing && existing.auth.type === 'oauth2' && existing.id === id;
+      if (prevSame) {
+        const prevHash = existing.publicConfigHash || (isOAuth(existing.auth) ? publicAuthFingerprint(existing.origin, existing.auth) : '');
+        const unchanged = prevHash === hash && !secretBumped;
+        stored.authConfigRevision = unchanged ? existing.authConfigRevision : existing.authConfigRevision + 1;
+        if (unchanged) {
+          stored.oauth = existing.oauth ? { ...existing.oauth } : undefined;
+          stored.runtimeStatus = existing.runtimeStatus;
+          stored.lastError = existing.lastError;
+          stored.lastStatusAt = existing.lastStatusAt;
+        } else {
+          invalidateOauthRuntime(stored);
+        }
+      } else {
+        stored.authConfigRevision = 1;
+      }
+    } else if (existing) {
+      stored.authConfigRevision = existing.authConfigRevision;
+    }
+
     next.set(id, stored);
     if (stored.default) defaultId = id;
   }
@@ -263,14 +481,7 @@ export function upsertLegacyHeadersPrincipal(missionId: string, origin: string, 
   if (existing) {
     for (const p of existing.principals.values()) {
       if (p.id === 'legacy-headers') continue;
-      writes.push({
-        id: p.id,
-        label: p.label,
-        roleHint: p.roleHint,
-        origin: p.origin,
-        default: p.default,
-        auth: p.auth,
-      });
+      writes.push(storedToWrite(p));
     }
   }
   writes.unshift({
@@ -336,7 +547,7 @@ export function teardownAllPrincipals(): void {
   for (const id of ids) clearRuntimeSecretSource(principalSecretSourceId(id));
 }
 
-export function setPrincipalOauthMaterial(missionId: string, principalId: string, patch: Partial<OAuthRuntimeMaterial> & { runtimeStatus?: PrincipalRuntimeStatus; lastError?: string }): boolean {
+export function setPrincipalOauthMaterial(missionId: string, principalId: string, patch: Partial<OAuthRuntimeMaterial> & { runtimeStatus?: PrincipalRuntimeStatus; lastError?: string; lastErrorCode?: string }): boolean {
   const p = getStoredPrincipal(missionId, principalId);
   if (!p || p.auth.type !== 'oauth2') return false;
   p.oauth = { ...(p.oauth || {}), ...patch };
@@ -347,6 +558,10 @@ export function setPrincipalOauthMaterial(missionId: string, principalId: string
   }
   if (patch.runtimeStatus) p.runtimeStatus = patch.runtimeStatus;
   if (patch.lastError !== undefined) p.lastError = patch.lastError;
+  if (patch.lastErrorCode !== undefined) {
+    if (!p.oauth) p.oauth = {};
+    p.oauth.lastErrorCode = patch.lastErrorCode;
+  }
   p.lastStatusAt = new Date().toISOString();
   syncMissionSecrets(missionId);
   return true;

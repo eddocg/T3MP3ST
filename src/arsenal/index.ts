@@ -430,11 +430,13 @@ async function targetFetch(url: string | URL, init: RequestInit = {}, authMode: 
   for (let redirects = 0; redirects <= 20; redirects++) {
     const headers = targetHeadersForUrl(currentUrl, explicitHeaders, authMode);
     const response = await globalThis.fetch(currentUrl, { ...init, method, body, headers, redirect: 'manual' });
-    if (response.status === 401 && !retriedAfterRefresh && store?.context.mission && resolved.ok && resolved.principalId) {
+    if (response.status === 401 && !retriedAfterRefresh && store?.context.mission && resolved.ok
+      && resolved.authMode === 'inherit' && resolved.oauthAttached && resolved.principalId) {
       retriedAfterRefresh = true;
-      const { refreshOAuth } = await import('../principals/index.js');
-      const refreshed = await refreshOAuth(store.context.mission, resolved.principalId, store.scope);
-      if (refreshed.ok) {
+      const { ensureOAuthAccess } = await import('../principals/index.js');
+      await ensureOAuthAccess(store.context.mission, resolved.principalId, store.scope, { forceRenewal: true });
+      const after = resolveForRequest(currentUrl, authMode);
+      if (after.ok && after.oauthAttached) {
         redirects -= 1;
         continue;
       }

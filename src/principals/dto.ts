@@ -7,37 +7,31 @@
 
 import { listPrincipals } from './store.js';
 import type { OAuthAcquireResult, OpenApiOAuthSuggestion } from './oauth.js';
+import type { OAuthDiscoverySuggestion } from './oauth/discovery.js';
 import type { PrincipalPublic } from './types.js';
-
-const PUBLIC_OAUTH_KEYS = [
-  'flow',
-  'authorizationUrl',
-  'tokenUrl',
-  'refreshUrl',
-  'clientId',
-  'scopes',
-  'audience',
-  'redirectUri',
-  'tokenType',
-  'expiresAt',
-  'hasRefreshToken',
-] as const;
 
 function publicOAuth(oauth: PrincipalPublic['oauth']): PrincipalPublic['oauth'] | undefined {
   if (!oauth) return undefined;
   const out: NonNullable<PrincipalPublic['oauth']> = {
     flow: oauth.flow,
+    grantType: oauth.grantType,
     hasRefreshToken: !!oauth.hasRefreshToken,
   };
+  if (oauth.clientAuth) out.clientAuth = oauth.clientAuth;
   if (oauth.authorizationUrl) out.authorizationUrl = oauth.authorizationUrl;
   if (oauth.tokenUrl) out.tokenUrl = oauth.tokenUrl;
   if (oauth.refreshUrl) out.refreshUrl = oauth.refreshUrl;
   if (oauth.clientId) out.clientId = oauth.clientId;
   if (oauth.scopes) out.scopes = oauth.scopes;
+  if (oauth.resource?.length) out.resource = [...oauth.resource];
   if (oauth.audience) out.audience = oauth.audience;
   if (oauth.redirectUri) out.redirectUri = oauth.redirectUri;
   if (oauth.tokenType) out.tokenType = oauth.tokenType;
   if (oauth.expiresAt) out.expiresAt = oauth.expiresAt;
+  if (oauth.renewalCapability) out.renewalCapability = oauth.renewalCapability;
+  if (oauth.pkce) out.pkce = oauth.pkce;
+  if (oauth.renewalPolicy) out.renewalPolicy = oauth.renewalPolicy;
+  if (oauth.extensionGrantType) out.extensionGrantType = oauth.extensionGrantType;
   return out;
 }
 
@@ -55,6 +49,8 @@ export function publicPrincipalDto(p: PrincipalPublic): PrincipalPublic {
     cookieNames: [...p.cookieNames],
     lastStatusAt: p.lastStatusAt,
     lastError: p.lastError,
+    lastErrorCode: p.lastErrorCode,
+    authConfigRevision: p.authConfigRevision,
     oauth: publicOAuth(p.oauth),
   };
 }
@@ -92,12 +88,27 @@ export function oauthImportBody(suggestions: OpenApiOAuthSuggestion[]): { sugges
       schemeName: s.schemeName,
       type: s.type,
       flow: s.flow,
+      grantType: s.grantType,
       authorizationUrl: s.authorizationUrl,
       tokenUrl: s.tokenUrl,
       refreshUrl: s.refreshUrl,
       scopes: s.scopes,
+      legacy: s.legacy,
     })),
   };
 }
 
-export { PUBLIC_OAUTH_KEYS };
+export function oauthDiscoveryBody(suggestion: OAuthDiscoverySuggestion): { suggestion: OAuthDiscoverySuggestion } {
+  return {
+    suggestion: {
+      issuer: suggestion.issuer,
+      authorizationUrl: suggestion.authorizationUrl,
+      tokenUrl: suggestion.tokenUrl,
+      refreshUrl: suggestion.refreshUrl,
+      grantTypesSupported: suggestion.grantTypesSupported,
+      tokenEndpointAuthMethodsSupported: suggestion.tokenEndpointAuthMethodsSupported,
+      codeChallengeMethodsSupported: suggestion.codeChallengeMethodsSupported,
+      scopes: suggestion.scopes,
+    },
+  };
+}

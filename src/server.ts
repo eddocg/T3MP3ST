@@ -43,9 +43,11 @@ import {
   refreshOAuth,
   exchangeOAuthCode,
   importOAuthFromOpenApi,
+  fetchOAuthDiscovery,
   principalsListBody,
   oauthActionBody,
   oauthImportBody,
+  oauthDiscoveryBody,
   type PrincipalWrite,
 } from './principals/index.js';
 import type { OperatorArchetype, LLMProvider, Task, Mission } from './types/index.js';
@@ -7520,6 +7522,28 @@ app.get('/api/mission/oauth/import', (_req: Request, res: Response) => {
   const sourceOrigin = view.stats.origins?.[0];
   const suggestions = importOAuthFromOpenApi(view.snapshot.securitySchemes, sourceOrigin);
   res.json(oauthImportBody(suggestions));
+});
+
+app.post('/api/mission/oauth/discover', async (req: Request, res: Response) => {
+  const cmd = getTempestCommand();
+  const missionId = cmd?.mission.getActiveMission()?.id;
+  if (!missionId || !cmd) {
+    res.status(409).json({ error: 'no active mission' });
+    return;
+  }
+  const metadataUrl = typeof (req.body as { metadataUrl?: unknown })?.metadataUrl === 'string'
+    ? (req.body as { metadataUrl: string }).metadataUrl
+    : '';
+  if (!metadataUrl) {
+    res.status(400).json({ error: true, code: 'malformed_token_response' });
+    return;
+  }
+  const result = await fetchOAuthDiscovery(metadataUrl, cmd.arsenal.getScope());
+  if (!result.ok) {
+    res.status(400).json({ error: true, code: result.code });
+    return;
+  }
+  res.json(oauthDiscoveryBody(result.suggestion));
 });
 
 // =============================================================================

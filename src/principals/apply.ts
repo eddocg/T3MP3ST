@@ -24,6 +24,7 @@ export interface ResolvedAuth {
   applied: boolean;
   principalId?: string;
   authStatusAtRequest?: PrincipalRuntimeStatus;
+  oauthAttached?: boolean;
 }
 
 export type AuthResolveResult = ResolvedAuth | AuthValidationFailure;
@@ -91,6 +92,7 @@ export function resolveRequestAuth(context: ToolContext | undefined, url: string
       };
     }
     const headers = compilePrincipalHeaders(selected.principal);
+    const oauthAttached = selected.principal.auth.type === 'oauth2' && !!headers && headers.has('authorization');
     return {
       ok: true,
       authMode,
@@ -98,6 +100,7 @@ export function resolveRequestAuth(context: ToolContext | undefined, url: string
       applied: !!headers && [...headers.keys()].length > 0,
       principalId: selected.principal.id,
       authStatusAtRequest: selected.principal.runtimeStatus,
+      oauthAttached,
     };
   }
 

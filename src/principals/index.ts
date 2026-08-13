@@ -53,6 +53,7 @@ export {
   ensureOAuthAccess,
   buildAuthorizationUrl,
   importOAuthFromOpenApi,
+  fetchOAuthDiscovery,
   setOAuthScopedHttp,
   isExpired,
   EXPIRY_SKEW_MS,
@@ -65,4 +66,5 @@ export {
   principalsListBody,
   oauthActionBody,
   oauthImportBody,
+  oauthDiscoveryBody,
 } from './dto.js';

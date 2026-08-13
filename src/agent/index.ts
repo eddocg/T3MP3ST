@@ -85,6 +85,8 @@ export interface ControlPlaneContext {
     authMethod: string;
     runtimeStatus: string;
     default: boolean;
+    grantType?: string;
+    renewalCapability?: string;
   }>;
 }
 
@@ -588,8 +590,8 @@ export class AgentLoop extends EventEmitter<AgentEvents> {
         parts.push(`- **Constraint/ROE**: ${c}`);
       }
       if (control.principals && control.principals.length > 0) {
-        parts.push(`- **Principals (names/status only)**: ${control.principals.map((p) => `${p.id} (${p.label}, ${p.authMethod}, ${p.runtimeStatus}${p.default ? ', default' : ''})`).join('; ')}.`);
-        parts.push(`- **Auth rule**: authMode is exactly inherit|none; principalId required when multiple principals are configured and no default is set. Do not invent authMode values such as configured or authenticated.`);
+        parts.push(`- **Principals (names/status only)**: ${control.principals.map((p) => `${p.id} (${p.label}, ${p.authMethod}${p.grantType ? `/${p.grantType}` : ''}, ${p.runtimeStatus}${p.renewalCapability ? `, renewal=${p.renewalCapability}` : ''}${p.default ? ', default' : ''})`).join('; ')}.`);
+        parts.push(`- **Auth rule**: authMode is exactly inherit|none; principalId required when multiple principals are configured and no default is set. Do not invent authMode values such as configured or authenticated. Do not construct OAuth token requests. The OAuth runtime owns acquisition and renewal.`);
       } else {
         parts.push(`- **Auth rule**: authMode is exactly inherit|none. Do not invent authMode values such as configured or authenticated.`);
       }

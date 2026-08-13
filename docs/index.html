@@ -27322,7 +27322,9 @@ Be specific and actionable. Format as structured JSON.`;
     return { id:'', label:'', roleHint:'', origin:_admOrigin(), default:false, authType:'custom_headers',
       headersJson:'', token:'', headerName:'X-API-Key', apiKey:'', username:'', password:'', cookiesJson:'',
       flow:'client_credentials', authorizationUrl:'', tokenUrl:'', refreshUrl:'', clientId:'', clientSecret:'',
-      scopes:'', audience:'', redirectUri:'', pkce:false, clientAuth:'body', runtimeStatus:'' };
+      scopes:'', audience:'', redirectUri:'', pkce:false, clientAuth:'none', runtimeStatus:'',
+      resource:'', extensionGrantType:'', safeParamsJson:'', secretParamsJson:'', renewalPolicy:'repeat_grant',
+      callbackUrl:'', code:'', state:'', metadataUrl:'', clearClientSecret:false, clearPassword:false, clearSecretParams:false };
   }
   function admiralAuthSection(){
     if (S.type!=='web') return '';
@@ -27348,6 +27350,74 @@ Be specific and actionable. Format as structured JSON.`;
     return html;
   }
   function secretPlaceholder(set){ return set ? 'value set (write-only)' : ''; }
+  function _admIn(pk, i, ph, val, type){
+    const t = type||'text';
+    return '<input'+(t==='password'?' type="password" autocomplete="off"':'')+' data-pk="'+pk+'" value="'+(t==='password'?'':esc(val||''))+'" placeholder="'+esc(ph||'')+'" oninput="admiralPatchPrincipal('+i+',this)" style="width:100%;box-sizing:border-box;margin-bottom:6px;padding:8px;font-size:12px;background:rgba(0,0,0,0.45);border:1px solid rgba(0,200,255,0.25);border-radius:6px;color:#e8f0f3;">';
+  }
+  function admiralOAuthFields(p, i){
+    const grant = p.flow || 'client_credentials';
+    const inp = 'width:100%;box-sizing:border-box;margin-bottom:6px;padding:8px;font-size:12px;background:rgba(0,0,0,0.45);border:1px solid rgba(0,200,255,0.25);border-radius:6px;color:#e8f0f3;';
+    const grants = [
+      ['client_credentials','Client credentials'],
+      ['authorization_code','Authorization code'],
+      ['authorization_code_pkce','Authorization code + PKCE'],
+      ['password','Password (ROPC) — LEGACY OAUTH FLOW — supported for interoperability; not recommended for new deployments'],
+      ['extension','Extension grant'],
+    ];
+    const auths = [
+      ['none','none'],
+      ['client_secret_basic','client_secret_basic (basic)'],
+      ['client_secret_post','client_secret_post (body)'],
+    ];
+    let html = '<select data-pk="flow" onchange="admiralPatchPrincipal('+i+',this);render();" style="'+inp+'">'
+      + grants.map(function(f){ return '<option value="'+f[0]+'"'+(grant===f[0]?' selected':'')+'>'+f[1]+'</option>'; }).join('')
+      + '</select>';
+    if (grant==='password') html += '<div style="font-size:10.5px;color:#f6c;margin-bottom:8px;line-height:1.4;">LEGACY OAUTH FLOW — supported for interoperability; not recommended for new deployments.</div>';
+    html += '<select data-pk="clientAuth" onchange="admiralPatchPrincipal('+i+',this)" style="'+inp+'">'
+      + auths.map(function(a){ return '<option value="'+a[0]+'"'+((p.clientAuth||'none')===a[0]?' selected':'')+'>'+a[1]+'</option>'; }).join('')
+      + '</select>';
+    html += _admIn('tokenUrl', i, 'tokenUrl', p.tokenUrl);
+    if (grant==='authorization_code' || grant==='authorization_code_pkce') {
+      html += _admIn('authorizationUrl', i, 'authorizationUrl', p.authorizationUrl);
+      html += _admIn('redirectUri', i, 'redirectUri', p.redirectUri);
+      html += '<label style="display:flex;gap:6px;align-items:center;font-size:11px;color:#bcd;margin-bottom:8px;"><input type="checkbox" '+(p.pkce || grant==='authorization_code_pkce'?'checked':'')+' onchange="S.principals['+i+'].pkce=this.checked"> PKCE S256</label>';
+    }
+    html += _admIn('refreshUrl', i, 'refreshUrl (optional)', p.refreshUrl);
+    html += _admIn('clientId', i, 'clientId', p.clientId);
+    html += _admIn('clientSecret', i, secretPlaceholder(!!p.clientSecret), p.clientSecret, 'password');
+    html += '<label style="display:flex;gap:6px;align-items:center;font-size:11px;color:#bcd;margin-bottom:8px;"><input type="checkbox" '+(p.clearClientSecret?'checked':'')+' onchange="S.principals['+i+'].clearClientSecret=this.checked"> Clear stored client secret</label>';
+    if (grant==='password') {
+      html += _admIn('username', i, 'username', p.username);
+      html += _admIn('password', i, secretPlaceholder(!!p.password), p.password, 'password');
+      html += '<label style="display:flex;gap:6px;align-items:center;font-size:11px;color:#bcd;margin-bottom:8px;"><input type="checkbox" '+(p.clearPassword?'checked':'')+' onchange="S.principals['+i+'].clearPassword=this.checked"> Clear stored password</label>';
+    }
+    html += _admIn('scopes', i, 'scopes (space-separated)', p.scopes);
+    html += _admIn('resource', i, 'resource indicators (space-separated, 0..N; never inferred from hostname)', p.resource);
+    html += _admIn('audience', i, 'audience (vendor/RFC 7523; separate from resource)', p.audience);
+    if (grant==='extension') {
+      html += _admIn('extensionGrantType', i, 'extension grant_type URN', p.extensionGrantType);
+      html += '<textarea data-pk="safeParamsJson" oninput="admiralPatchPrincipal('+i+',this)" placeholder="safeParams JSON object" style="width:100%;min-height:48px;box-sizing:border-box;margin-bottom:6px;padding:8px;font-size:11px;background:rgba(0,0,0,0.45);border:1px solid rgba(0,200,255,0.25);border-radius:6px;color:#e8f0f3;font-family:\'JetBrains Mono\',monospace;">'+esc(p.safeParamsJson||'')+'</textarea>';
+      html += '<textarea data-pk="secretParamsJson" oninput="admiralPatchPrincipal('+i+',this)" placeholder="'+(p.secretParamsJson ? 'value set (write-only)' : 'secretParams JSON object')+'" style="width:100%;min-height:48px;box-sizing:border-box;margin-bottom:6px;padding:8px;font-size:11px;background:rgba(0,0,0,0.45);border:1px solid rgba(0,200,255,0.25);border-radius:6px;color:#e8f0f3;font-family:\'JetBrains Mono\',monospace;"></textarea>';
+      html += '<label style="display:flex;gap:6px;align-items:center;font-size:11px;color:#bcd;margin-bottom:8px;"><input type="checkbox" '+(p.clearSecretParams?'checked':'')+' onchange="S.principals['+i+'].clearSecretParams=this.checked"> Clear stored secret params</label>';
+      html += '<select data-pk="renewalPolicy" onchange="admiralPatchPrincipal('+i+',this)" style="'+inp+'">'
+        + [['repeat_grant','renewal: repeat_grant'],['interactive','renewal: interactive'],['never','renewal: never']].map(function(r){ return '<option value="'+r[0]+'"'+((p.renewalPolicy||'repeat_grant')===r[0]?' selected':'')+'>'+r[1]+'</option>'; }).join('')
+        + '</select>';
+    }
+    html += _admIn('metadataUrl', i, 'RFC 8414 metadata URL (operator-triggered)', p.metadataUrl);
+    if (grant==='authorization_code' || grant==='authorization_code_pkce') {
+      html += _admIn('callbackUrl', i, 'callback URL (code+state) or paste below', p.callbackUrl);
+      html += _admIn('code', i, 'authorization code', p.code);
+      html += _admIn('state', i, 'state', p.state);
+    }
+    html += '<div style="display:flex;gap:8px;flex-wrap:wrap;">'
+      + '<button type="button" onclick="admiralImportOAuth('+i+')" style="padding:6px 10px;font-size:11px;border-radius:6px;border:1px solid rgba(0,200,255,0.35);background:rgba(0,136,255,0.1);color:#9cf;cursor:pointer;">Import from OpenAPI</button>'
+      + '<button type="button" onclick="admiralDiscoverOAuth('+i+')" style="padding:6px 10px;font-size:11px;border-radius:6px;border:1px solid rgba(0,200,255,0.35);background:rgba(0,136,255,0.1);color:#9cf;cursor:pointer;">Discover Metadata</button>'
+      + '<button type="button" onclick="admiralAcquireOAuth('+i+')" style="padding:6px 10px;font-size:11px;border-radius:6px;border:1px solid rgba(0,200,255,0.35);background:rgba(0,136,255,0.1);color:#9cf;cursor:pointer;">Acquire</button>'
+      + '<button type="button" onclick="admiralRefreshOAuth('+i+')" style="padding:6px 10px;font-size:11px;border-radius:6px;border:1px solid rgba(0,200,255,0.35);background:rgba(0,136,255,0.1);color:#9cf;cursor:pointer;">Refresh</button>'
+      + ((grant==='authorization_code' || grant==='authorization_code_pkce') ? '<button type="button" onclick="admiralSubmitOAuthCode('+i+')" style="padding:6px 10px;font-size:11px;border-radius:6px;border:1px solid rgba(0,200,255,0.35);background:rgba(0,136,255,0.1);color:#9cf;cursor:pointer;">Provide callback / code+state</button>' : '')
+      + '</div>';
+    return html;
+  }
   function admiralPrincipalCard(p, i, mode){
     const types = [['custom_headers','Custom Headers'],['static_bearer','Bearer'],['api_key','API Key (header)'],['http_basic','Basic'],['cookie_session','Cookie (static)'],['oauth2','OAuth2']];
     const chip = p.runtimeStatus ? '<span style="margin-left:8px;font-size:10px;letter-spacing:0.4px;color:#9cf;">'+esc(String(p.runtimeStatus).toUpperCase())+'</span>' : '';
@@ -27359,21 +27429,7 @@ Be specific and actionable. Format as structured JSON.`;
     else if (p.authType==='http_basic') fields = '<input data-pk="username" value="'+esc(p.username||'')+'" placeholder="Username" oninput="admiralPatchPrincipal('+i+',this)" style="width:100%;box-sizing:border-box;margin-bottom:6px;padding:8px;font-size:12px;background:rgba(0,0,0,0.45);border:1px solid rgba(0,200,255,0.25);border-radius:6px;color:#e8f0f3;">'
       + '<input type="password" autocomplete="off" data-pk="password" placeholder="'+secretPlaceholder(!!p.password)+'" oninput="admiralPatchPrincipal('+i+',this)" style="width:100%;box-sizing:border-box;padding:8px;font-size:12px;background:rgba(0,0,0,0.45);border:1px solid rgba(0,200,255,0.25);border-radius:6px;color:#e8f0f3;">';
     else if (p.authType==='cookie_session') fields = '<textarea data-pk="cookiesJson" oninput="admiralPatchPrincipal('+i+',this)" placeholder="'+(p.cookiesJson ? 'value set (write-only)' : '{&quot;session&quot;:&quot;…&quot;}')+'" style="width:100%;min-height:64px;box-sizing:border-box;padding:8px;font-size:11px;background:rgba(0,0,0,0.45);border:1px solid rgba(0,200,255,0.25);border-radius:6px;color:#e8f0f3;font-family:\'JetBrains Mono\',monospace;"></textarea>';
-    else if (p.authType==='oauth2') fields = '<select data-pk="flow" onchange="admiralPatchPrincipal('+i+',this)" style="width:100%;margin-bottom:6px;padding:8px;background:rgba(0,0,0,0.45);border:1px solid rgba(0,200,255,0.25);border-radius:6px;color:#e8f0f3;">'
-      + [['client_credentials','Client credentials'],['refresh_token','Refresh token'],['authorization_code','Authorization code'],['authorization_code_pkce','Authorization code + PKCE']].map(function(f){ return '<option value="'+f[0]+'"'+(p.flow===f[0]?' selected':'')+'>'+f[1]+'</option>'; }).join('')
-      + '</select>'
-      + '<input data-pk="authorizationUrl" value="'+esc(p.authorizationUrl||'')+'" placeholder="authorizationUrl" oninput="admiralPatchPrincipal('+i+',this)" style="width:100%;box-sizing:border-box;margin-bottom:6px;padding:8px;font-size:12px;background:rgba(0,0,0,0.45);border:1px solid rgba(0,200,255,0.25);border-radius:6px;color:#e8f0f3;">'
-      + '<input data-pk="tokenUrl" value="'+esc(p.tokenUrl||'')+'" placeholder="tokenUrl" oninput="admiralPatchPrincipal('+i+',this)" style="width:100%;box-sizing:border-box;margin-bottom:6px;padding:8px;font-size:12px;background:rgba(0,0,0,0.45);border:1px solid rgba(0,200,255,0.25);border-radius:6px;color:#e8f0f3;">'
-      + '<input data-pk="refreshUrl" value="'+esc(p.refreshUrl||'')+'" placeholder="refreshUrl (optional)" oninput="admiralPatchPrincipal('+i+',this)" style="width:100%;box-sizing:border-box;margin-bottom:6px;padding:8px;font-size:12px;background:rgba(0,0,0,0.45);border:1px solid rgba(0,200,255,0.25);border-radius:6px;color:#e8f0f3;">'
-      + '<input data-pk="clientId" value="'+esc(p.clientId||'')+'" placeholder="clientId" oninput="admiralPatchPrincipal('+i+',this)" style="width:100%;box-sizing:border-box;margin-bottom:6px;padding:8px;font-size:12px;background:rgba(0,0,0,0.45);border:1px solid rgba(0,200,255,0.25);border-radius:6px;color:#e8f0f3;">'
-      + '<input type="password" autocomplete="off" data-pk="clientSecret" placeholder="'+secretPlaceholder(!!p.clientSecret)+'" oninput="admiralPatchPrincipal('+i+',this)" style="width:100%;box-sizing:border-box;margin-bottom:6px;padding:8px;font-size:12px;background:rgba(0,0,0,0.45);border:1px solid rgba(0,200,255,0.25);border-radius:6px;color:#e8f0f3;">'
-      + '<input data-pk="scopes" value="'+esc(p.scopes||'')+'" placeholder="scopes (space-separated)" oninput="admiralPatchPrincipal('+i+',this)" style="width:100%;box-sizing:border-box;margin-bottom:6px;padding:8px;font-size:12px;background:rgba(0,0,0,0.45);border:1px solid rgba(0,200,255,0.25);border-radius:6px;color:#e8f0f3;">'
-      + '<input data-pk="redirectUri" value="'+esc(p.redirectUri||'')+'" placeholder="redirectUri" oninput="admiralPatchPrincipal('+i+',this)" style="width:100%;box-sizing:border-box;margin-bottom:6px;padding:8px;font-size:12px;background:rgba(0,0,0,0.45);border:1px solid rgba(0,200,255,0.25);border-radius:6px;color:#e8f0f3;">'
-      + '<label style="display:flex;gap:6px;align-items:center;font-size:11px;color:#bcd;margin-bottom:8px;"><input type="checkbox" '+(p.pkce?'checked':'')+' onchange="S.principals['+i+'].pkce=this.checked"> PKCE S256</label>'
-      + '<div style="display:flex;gap:8px;flex-wrap:wrap;">'
-      + '<button type="button" onclick="admiralImportOAuth('+i+')" style="padding:6px 10px;font-size:11px;border-radius:6px;border:1px solid rgba(0,200,255,0.35);background:rgba(0,136,255,0.1);color:#9cf;cursor:pointer;">Import from OpenAPI</button>'
-      + '<button type="button" onclick="admiralAcquireOAuth('+i+')" style="padding:6px 10px;font-size:11px;border-radius:6px;border:1px solid rgba(0,200,255,0.35);background:rgba(0,136,255,0.1);color:#9cf;cursor:pointer;">Acquire / Test</button>'
-      + '</div>';
+    else if (p.authType==='oauth2') fields = admiralOAuthFields(p, i);
     return '<div style="margin-top:10px;padding:12px;border:1px solid rgba(0,200,255,0.18);border-radius:10px;background:rgba(0,200,255,0.04);">'
       + '<div style="display:flex;justify-content:space-between;gap:8px;align-items:center;margin-bottom:8px;"><div style="font-size:12px;color:#cfe;font-weight:700;">Principal '+(i+1)+chip+'</div>'
       + (mode==='multiple'?'<button type="button" onclick="admiralRemovePrincipal('+i+')" style="font-size:11px;color:#ff8f6b;background:none;border:none;cursor:pointer;">Remove</button>':'')
@@ -27401,14 +27457,14 @@ Be specific and actionable. Format as structured JSON.`;
   };
   window.admiralPatchPrincipal = function(i, el){
     const k = el.getAttribute('data-pk'); if(!k || !S.principals[i]) return;
-    if ((k==='headersJson' || k==='cookiesJson' || k==='token' || k==='apiKey' || k==='password' || k==='clientSecret') && !el.value) return;
+    if ((k==='headersJson' || k==='cookiesJson' || k==='token' || k==='apiKey' || k==='password' || k==='clientSecret' || k==='secretParamsJson') && !el.value) return;
     S.principals[i][k] = el.type==='checkbox' ? !!el.checked : el.value;
   };
   function admiralDisposeBoundSecrets(){
     S.headers = '';
     (S.principals||[]).forEach(function(p){
       p.token=''; p.apiKey=''; p.password=''; p.clientSecret='';
-      p.headersJson=''; p.cookiesJson='';
+      p.headersJson=''; p.cookiesJson=''; p.secretParamsJson=''; p.code=''; p.state=''; p.callbackUrl='';
     });
   }
   window.admiralDisposeBoundSecrets = admiralDisposeBoundSecrets;
@@ -27425,7 +27481,9 @@ Be specific and actionable. Format as structured JSON.`;
       const p = S.principals[i];
       p.authType = 'oauth2';
       if (s.flow==='authorizationCode') p.flow = 'authorization_code';
-      else if (s.flow) p.flow = s.flow;
+      else if (s.flow==='clientCredentials' || s.grantType==='client_credentials') p.flow = 'client_credentials';
+      else if (s.flow==='password' || s.grantType==='password') p.flow = 'password';
+      else if (s.flow) p.flow = s.grantType || s.flow;
       p.authorizationUrl = s.authorizationUrl||'';
       p.tokenUrl = s.tokenUrl||'';
       p.refreshUrl = s.refreshUrl||'';
@@ -27440,11 +27498,52 @@ Be specific and actionable. Format as structured JSON.`;
       const r = await fetch('/api/mission/principals/'+encodeURIComponent(p.id)+'/auth/acquire', { method:'POST', headers:{'Content-Type':'application/json'}, body:'{}' });
       const d = await r.json();
       if (d.principal && d.principal.runtimeStatus) p.runtimeStatus = d.principal.runtimeStatus;
-      if (d.authorizationUrl){ p.authorizationUrl = d.authorizationUrl; if(window.toast) toast('Authorization URL ready — complete login externally, then submit code+state','success'); }
+      if (d.authorizationUrl){ p.authorizationUrlShown = d.authorizationUrl; if(window.toast) toast('Authorization URL ready — complete login externally, then Provide callback / code+state','success'); }
       else if (r.ok) { if(window.toast) toast('Token acquired (LIVE)','success'); }
       else if(window.toast) toast((d.code||'acquire failed'),'warning');
       render();
     } catch(e){ if(window.toast) toast('Acquire failed','warning'); }
+  };
+  window.admiralRefreshOAuth = async function(i){
+    const p = S.principals[i];
+    if (!p || !p.id){ if(window.toast) toast('Refresh runs on a live mission after launch','warning'); return; }
+    try {
+      const r = await fetch('/api/mission/principals/'+encodeURIComponent(p.id)+'/auth/refresh', { method:'POST', headers:{'Content-Type':'application/json'}, body:'{}' });
+      const d = await r.json();
+      if (d.principal && d.principal.runtimeStatus) p.runtimeStatus = d.principal.runtimeStatus;
+      if (r.ok) { if(window.toast) toast('Refreshed (LIVE)','success'); }
+      else if(window.toast) toast((d.code||'refresh failed'),'warning');
+      render();
+    } catch(e){ if(window.toast) toast('Refresh failed','warning'); }
+  };
+  window.admiralSubmitOAuthCode = async function(i){
+    const p = S.principals[i];
+    if (!p || !p.id){ if(window.toast) toast('Code exchange runs on a live mission after launch','warning'); return; }
+    try {
+      const r = await fetch('/api/mission/principals/'+encodeURIComponent(p.id)+'/auth/code', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ code:p.code||undefined, state:p.state||undefined, callbackUrl:p.callbackUrl||undefined }) });
+      const d = await r.json();
+      p.code=''; p.state=''; p.callbackUrl='';
+      if (d.principal && d.principal.runtimeStatus) p.runtimeStatus = d.principal.runtimeStatus;
+      if (r.ok) { if(window.toast) toast('Code exchanged (LIVE)','success'); }
+      else if(window.toast) toast((d.code||'code exchange failed'),'warning');
+      render();
+    } catch(e){ if(window.toast) toast('Code exchange failed','warning'); }
+  };
+  window.admiralDiscoverOAuth = async function(i){
+    const p = S.principals[i];
+    if (!p || !p.metadataUrl){ if(window.toast) toast('Set a metadata URL first','warning'); return; }
+    try {
+      const r = await fetch('/api/mission/oauth/discover', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ metadataUrl: p.metadataUrl }) });
+      const d = await r.json();
+      if (!r.ok){ if(window.toast) toast((d.code||'discover failed'),'warning'); return; }
+      const s = d.suggestion||{};
+      if (s.authorizationUrl) p.authorizationUrl = s.authorizationUrl;
+      if (s.tokenUrl) p.tokenUrl = s.tokenUrl;
+      if (s.refreshUrl) p.refreshUrl = s.refreshUrl;
+      if (s.scopes) p.scopes = (s.scopes||[]).join(' ');
+      if(window.toast) toast('Metadata imported as suggestion only — endpoints are not authorized','success');
+      render();
+    } catch(e){ if(window.toast) toast('Discover failed','warning'); }
   };
   function admiralValidatePrincipals(){
     const mode = S.principalMode || 'none';
@@ -27474,14 +27573,24 @@ Be specific and actionable. Format as structured JSON.`;
       return { type:'cookie_session', cookies:c };
     }
     if (p.authType==='oauth2'){
-      const auth = { type:'oauth2', flow:p.flow||'client_credentials', tokenUrl:p.tokenUrl, clientAuth:p.clientAuth||'body', pkce:!!p.pkce };
+      const auth = { type:'oauth2', grantType:p.flow||'client_credentials', flow:p.flow||'client_credentials', tokenUrl:p.tokenUrl, clientAuth:p.clientAuth||'none', pkce:!!p.pkce };
       if (p.authorizationUrl) auth.authorizationUrl = p.authorizationUrl;
       if (p.refreshUrl) auth.refreshUrl = p.refreshUrl;
       if (p.clientId) auth.clientId = p.clientId;
-      if (p.clientSecret) auth.clientSecret = p.clientSecret;
+      if (p.clearClientSecret) auth.clientSecret = null;
+      else if (p.clientSecret) auth.clientSecret = p.clientSecret;
       if (p.scopes) auth.scopes = String(p.scopes).split(/[,\s]+/).filter(Boolean);
+      if (p.resource) auth.resource = String(p.resource).split(/[,\s]+/).filter(Boolean);
       if (p.audience) auth.audience = p.audience;
       if (p.redirectUri) auth.redirectUri = p.redirectUri;
+      if (p.username) auth.username = p.username;
+      if (p.clearPassword) auth.password = null;
+      else if (p.password) auth.password = p.password;
+      if (p.extensionGrantType) auth.extensionGrantType = p.extensionGrantType;
+      if (p.renewalPolicy) auth.renewalPolicy = p.renewalPolicy;
+      if (p.safeParamsJson) { try { auth.safeParams = JSON.parse(p.safeParamsJson); } catch(e){} }
+      if (p.clearSecretParams) auth.secretParams = null;
+      else if (p.secretParamsJson) { try { auth.secretParams = JSON.parse(p.secretParamsJson); } catch(e){} }
       return auth;
     }
     let h={}; try { h=JSON.parse(p.headersJson||'{}'); } catch(e){ h={}; }

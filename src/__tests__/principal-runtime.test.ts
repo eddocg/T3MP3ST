@@ -53,6 +53,7 @@ function response(status = 200, body = '{}', headers: Record<string, string> = {
     },
     text: async () => body,
     json: async () => JSON.parse(body),
+    arrayBuffer: async () => Buffer.from(body),
   } as unknown as Response;
 }
 
@@ -453,6 +454,7 @@ describe('control-plane principals API is metadata-only', () => {
     expect(source).toContain("app.post('/api/mission/principals/:id/auth/refresh'");
     expect(source).toContain("app.post('/api/mission/principals/:id/auth/code'");
     expect(source).toContain("app.get('/api/mission/oauth/import'");
+    expect(source).toContain("app.post('/api/mission/oauth/discover'");
     const getBlock = source.slice(source.indexOf("app.get('/api/mission/principals'"), source.indexOf("app.put('/api/mission/principals'"));
     expect(getBlock).toContain('principalsListBody');
     expect(getBlock).not.toContain('redactSecrets');
@@ -473,10 +475,12 @@ describe('control-plane principals API is metadata-only', () => {
   });
 
   it('OAuth token HTTP uses the ScopeGuard primitive, not a raw globalThis.fetch after a separate check', () => {
-    const oauth = readFileSync(join(__dirname, '..', 'principals', 'oauth.ts'), 'utf8');
+    const oauthDir = join(__dirname, '..', 'principals', 'oauth');
+    const engine = readFileSync(join(oauthDir, 'engine.ts'), 'utf8');
+    const http = readFileSync(join(oauthDir, 'http.ts'), 'utf8');
     const arsenal = readFileSync(join(__dirname, '..', 'arsenal', 'index.ts'), 'utf8');
-    expect(oauth).not.toContain('globalThis.fetch');
-    expect(oauth).toContain('scopedHttp(');
+    expect(engine).not.toContain('globalThis.fetch');
+    expect(http).toContain('scopedHttp(');
     expect(arsenal).toContain('export async function scopedInternalFetch');
     expect(arsenal).toContain('setOAuthScopedHttp((url, init, scope) => scopedInternalFetch(scope, url, init))');
   });
@@ -583,7 +587,7 @@ describe('oauth state-gated attachment', () => {
       id: 'oauth',
       label: 'OAuth',
       origin: ORIGIN,
-      auth: { type: 'oauth2', flow: 'client_credentials', tokenUrl: `${ORIGIN}/token`, clientId: 'cid', clientSecret: 'oauth-client-secret-value' },
+      auth: { type: 'oauth2', flow: 'authorization_code', authorizationUrl: `${ORIGIN}/authorize`, tokenUrl: `${ORIGIN}/token`, clientId: 'cid' },
     }]);
     const arsenal = new Arsenal();
     arsenal.register(BUILTIN_TOOLS.find((t) => t.name === 'http_request')!);
@@ -603,7 +607,7 @@ describe('oauth state-gated attachment', () => {
       id: 'oauth',
       label: 'OAuth',
       origin: ORIGIN,
-      auth: { type: 'oauth2', flow: 'client_credentials', tokenUrl: `${ORIGIN}/token`, clientId: 'cid', clientSecret: 'oauth-client-secret-value' },
+      auth: { type: 'oauth2', flow: 'authorization_code', authorizationUrl: `${ORIGIN}/authorize`, tokenUrl: `${ORIGIN}/token`, clientId: 'cid' },
     }]);
     setPrincipalOauthMaterial('m1', 'oauth', {
       accessToken: 'leftover-access-token-zzzzzz',
@@ -628,7 +632,7 @@ describe('oauth state-gated attachment', () => {
       id: 'oauth',
       label: 'OAuth',
       origin: ORIGIN,
-      auth: { type: 'oauth2', flow: 'client_credentials', tokenUrl: `${ORIGIN}/token`, clientId: 'cid', clientSecret: 'oauth-client-secret-value' },
+      auth: { type: 'oauth2', flow: 'authorization_code', authorizationUrl: `${ORIGIN}/authorize`, tokenUrl: `${ORIGIN}/token`, clientId: 'cid' },
     }]);
     setPrincipalOauthMaterial('m1', 'oauth', {
       accessToken: 'stale-access-token-zzzzzz',
@@ -830,7 +834,7 @@ describe('oauth expiry skew (once) and refresh correctness', () => {
     }));
     await arsenal.execute('http_request', createToolContext(undefined, { url: `${ORIGIN}/v1` }, 'm1'));
     expect(apiCalls).toBe(1);
-    expect(tokenPosts).toBe(1);
+    expect(tokenPosts).toBe(2);
     expect(getStoredPrincipal('m1', 'oauth')!.runtimeStatus).toBe('failed');
   });
 });

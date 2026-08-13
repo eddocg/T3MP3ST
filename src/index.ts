@@ -1799,6 +1799,8 @@ export class TempestCommand extends EventEmitter<CommandEvents> {
           authMethod: p.authMethod,
           runtimeStatus: p.runtimeStatus,
           default: p.default,
+          grantType: p.oauth?.grantType,
+          renewalCapability: p.oauth?.renewalCapability,
         }))
       : [];
     return {
